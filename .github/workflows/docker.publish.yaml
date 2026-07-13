@@ -40,7 +40,7 @@ jobs:
           from unittest.mock import patch
 
           from valorant_mcp_server import http_server
-          from valorant_mcp_server.server import mcp
+          from valorant_mcp_server.server import REDUNDANT_TOOL_NAMES, mcp
 
           async def main():
               tools = await mcp.list_tools()
@@ -51,10 +51,11 @@ jobs:
               required_tools = {
                   "get_rank",
                   "get_rank_history",
-                  "get_match_details",
+                  "get_match",
                   "get_live_status",
                   "get_static_content",
-                  "get_player_activity_report",
+                  "get_player_playtime",
+                  "get_player_playtime_audit",
                   "get_weekly_activity_report",
                   "get_role_profile",
                   "get_consistency_score",
@@ -82,6 +83,8 @@ jobs:
                   "get_player_analytics_bundle",
               }
               assert required_tools <= tool_names, required_tools - tool_names
+              assert len(tool_names) == 83, len(tool_names)
+              assert REDUNDANT_TOOL_NAMES.isdisjoint(tool_names)
               assert "valorant://agents" in resource_uris
               print(f"Registered {len(tools)} MCP tools")
 
