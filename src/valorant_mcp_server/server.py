@@ -6,6 +6,7 @@ as a set of MCP tools callable by any MCP-compatible AI client.
 
 Environment variables:
   HENRIK_API_KEY  (required) Your Henrik Dev API key.
+  MCP_EXPOSE_LEGACY_TOOLS  (optional) Re-enable redundant compatibility tools.
 
 Usage:
   valorant-mcp-server              # run via installed script
@@ -1074,6 +1075,33 @@ DEFAULT_DASHBOARD_ROSTER: list[dict[str, Any]] = [
         "platform": "pc",
     },
 ]
+
+REDUNDANT_TOOL_NAMES = frozenset(
+    {
+        "get_account_by_puuid_v1",
+        "get_account_by_puuid_v2",
+        "get_account_v1",
+        "get_account_v2",
+        "get_agent_stats",
+        "get_esports_schedule",
+        "get_esports_schedule_by_league",
+        "get_esports_schedule_by_region",
+        "get_leaderboard_v3",
+        "get_match_details",
+        "get_match_details_v4",
+        "get_match_history_v4",
+        "get_mmr",
+        "get_mmr_by_puuid_v3",
+        "get_mmr_history",
+        "get_mmr_history_by_puuid",
+        "get_mmr_history_v1",
+        "get_mmr_v3",
+        "get_player_activity_report",
+        "get_server_status",
+        "get_weekly_performance",
+        "get_winrate_by_map",
+    }
+)
 
 _DASHBOARD_CACHE: dict[str, Any] | None = None
 _DASHBOARD_CACHE_KEY: str | None = None
@@ -4753,6 +4781,26 @@ async def get_weekly_activity_report(
         "notes": report.get("notes", []),
         "audit_available": True,
     }
+
+
+def _legacy_tools_enabled() -> bool:
+    return os.getenv("MCP_EXPOSE_LEGACY_TOOLS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _apply_tool_visibility() -> None:
+    if _legacy_tools_enabled():
+        return
+
+    for tool_name in REDUNDANT_TOOL_NAMES:
+        mcp.remove_tool(tool_name)
+
+
+_apply_tool_visibility()
 
 
 # ---------------------------------------------------------------------------
