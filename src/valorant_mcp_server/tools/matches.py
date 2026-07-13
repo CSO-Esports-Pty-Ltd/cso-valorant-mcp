@@ -6,10 +6,53 @@ Endpoints used:
   GET /valorant/v4/match/{region}/{matchid}
 """
 
+import asyncio
+import os
+import time
+from collections import OrderedDict
 from typing import Any
 
 from valorant_mcp_server import client
 from valorant_mcp_server.literals import GameMode, MapName, Platform, Region
+
+
+_MATCH_CACHE_TTL_SECONDS = max(
+    0.0, float(os.getenv("HENRIK_MATCH_CACHE_TTL_SECONDS", "300"))
+)
+_MATCH_CACHE_MAX_ENTRIES = max(
+    1, int(os.getenv("HENRIK_MATCH_CACHE_MAX_ENTRIES", "256"))
+)
+_MATCH_DETAIL_CACHE: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_MATCH_DETAIL_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def clear_match_detail_cache() -> None:
+    _MATCH_DETAIL_CACHE.clear()
+    _MATCH_DETAIL_LOCKS.clear()
+
+
+def _cached_match(cache_key: str) -> dict[str, Any] | None:
+    entry = _MATCH_DETAIL_CACHE.get(cache_key)
+    if not entry:
+        return None
+    expires_at, payload = entry
+    if expires_at <= time.monotonic():
+        _MATCH_DETAIL_CACHE.pop(cache_key, None)
+        return None
+    _MATCH_DETAIL_CACHE.move_to_end(cache_key)
+    return payload
+
+
+def _store_match(cache_key: str, payload: dict[str, Any]) -> None:
+    if _MATCH_CACHE_TTL_SECONDS <= 0:
+        return
+    _MATCH_DETAIL_CACHE[cache_key] = (
+        time.monotonic() + _MATCH_CACHE_TTL_SECONDS,
+        payload,
+    )
+    _MATCH_DETAIL_CACHE.move_to_end(cache_key)
+    while len(_MATCH_DETAIL_CACHE) > _MATCH_CACHE_MAX_ENTRIES:
+        _MATCH_DETAIL_CACHE.popitem(last=False)
 
 
 async def get_match_history(
@@ -20,6 +63,7 @@ async def get_match_history(
     mode: GameMode | None = None,
     map_name: MapName | None = None,
     size: int | None = None,
+    start: int | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve recent match history for a player by Riot ID.
 
@@ -30,7 +74,8 @@ async def get_match_history(
         platform: Platform to query — 'pc' (default) or 'console'.
         mode: Optional game mode filter (e.g. 'competitive', 'unrated').
         map_name: Optional map_name name filter (e.g. 'Ascent', 'Bind').
-        size: Number of matches to return (max varies by API tier).
+        size: Number of matches to return (the API defaults to 10).
+        start: Optional v4 pagination start index.
 
     Returns:
         A list of match summary objects. Each entry includes match metadata,
@@ -40,9 +85,11 @@ async def get_match_history(
     if mode:
         params["mode"] = mode
     if map_name:
-        params["map_name"] = map_name
+        params["map"] = map_name
     if size is not None:
         params["size"] = size
+    if start is not None:
+        params["start"] = max(0, start)
 
     data = await client.get(
         f"/valorant/v4/matches/{region}/{platform}/{name}/{tag}", params=params
@@ -61,5 +108,23 @@ async def get_match(region: Region, match_id: str) -> dict[str, Any]:
         A dictionary with complete match data including metadata, all players,
         round results, kills, economy, and team outcomes.
     """
-    data = await client.get(f"/valorant/v4/match/{region}/{match_id}")
-    return data.get("data", data)
+    cache_key = f"{str(region).lower()}:{match_id}"
+    cached = _cached_match(cache_key)
+    if cached is not None:
+        return cached
+
+    lock = _MATCH_DETAIL_LOCKS.setdefault(cache_key, asyncio.Lock())
+    try:
+        async with lock:
+            cached = _cached_match(cache_key)
+            if cached is not None:
+                return cached
+
+            data = await client.get(f"/valorant/v4/match/{region}/{match_id}")
+            payload = data.get("data", data)
+            if isinstance(payload, dict) and not payload.get("error"):
+                _store_match(cache_key, payload)
+            return payload
+    finally:
+        if _MATCH_DETAIL_LOCKS.get(cache_key) is lock:
+            _MATCH_DETAIL_LOCKS.pop(cache_key, None)

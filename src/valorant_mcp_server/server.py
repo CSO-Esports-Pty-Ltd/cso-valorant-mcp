@@ -2248,6 +2248,7 @@ async def get_match_history(
     mode: GameMode | None = None,
     map_name: MapName | None = None,
     size: int | None = None,
+    start: int | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve recent match history for a player by Riot ID.
 
@@ -2261,10 +2262,11 @@ async def get_match_history(
         platform: 'pc' (default) or 'console'.
         mode: Optional game mode filter (e.g. 'competitive', 'unrated').
         map: Optional map name filter (e.g. 'Ascent').
-        size: Number of matches to return. Default and max vary by API tier.
+        size: Number of matches to return. Henrik v4 defaults to 10.
+        start: Optional v4 pagination start index.
     """
     return await matches.get_match_history(
-        region, name, tag, platform, mode, map_name, size
+        region, name, tag, platform, mode, map_name, size, start
     )
 
 

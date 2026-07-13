@@ -35,6 +35,7 @@ Equip your AI with comprehensive Valorant knowledge:
 - 🏆 **Rank & MMR**: Check current competitive tier, Ranked Rating (RR), and full match rating history natively.
 - 🔫 **Match History**: Access detailed summaries of recent games, filterable by map, mode, or platform.
 - 📊 **Match Details**: Dive deep into post-game details, including economy, rounds, and per-player statistics.
+- 📈 **CSO Analytics**: Calculate KAST, opening-duel, clutch, impact, and side-split metrics individually or in one cached bundle.
 - 🌐 **Leaderboards**: Pull ranked leaderboards for any region, filter for specific players, or check historical seasons.
 
 ---
@@ -249,6 +250,24 @@ matches. Use `VALORANT_DASHBOARD_MODE=all`, or pass `mode=all`, when the
 dashboard should use all recent Valorant matches for better roster coverage.
 For Docker deployments, mount a host directory to `/data` so the last-good
 player cache survives container recreation.
+
+Shared Henrik requests use connection pooling, bounded retries, and in-memory
+match caching. These optional environment variables control that behavior:
+
+```bash
+HENRIK_MAX_RETRIES=2
+HENRIK_MAX_RETRY_AFTER_SECONDS=30
+HENRIK_MAX_CONNECTIONS=20
+HENRIK_MAX_KEEPALIVE_CONNECTIONS=10
+HENRIK_MATCH_CACHE_TTL_SECONDS=300
+HENRIK_MATCH_CACHE_MAX_ENTRIES=256
+HENRIK_ANALYTICS_CACHE_TTL_SECONDS=60
+HENRIK_ANALYTICS_CACHE_MAX_ENTRIES=128
+```
+
+Use `get_player_analytics_bundle` when all five CSO analytics are required for
+one player. It reuses the same match payloads instead of issuing five separate
+history and detail request batches.
 
 Then set the Sites dashboard environment to:
 

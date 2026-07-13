@@ -79,6 +79,7 @@ jobs:
                   "get_clutch_rate",
                   "get_multi_match_impact",
                   "get_side_split_stats",
+                  "get_player_analytics_bundle",
               }
               assert required_tools <= tool_names, required_tools - tool_names
               assert "valorant://agents" in resource_uris

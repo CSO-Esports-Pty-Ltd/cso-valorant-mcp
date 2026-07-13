@@ -6,7 +6,9 @@ the fields we need instead of assuming one exact round or kill schema.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+import os
+import time
+from collections import Counter, OrderedDict, defaultdict
 from typing import Any
 
 from mcp.types import ToolAnnotations
@@ -25,6 +27,18 @@ from valorant_mcp_server.tools import matches
 
 MAX_MATCH_COUNT = 10
 TRADE_WINDOW_MS = 5000
+ANALYTICS_CACHE_TTL_SECONDS = max(
+    0.0, float(os.getenv("HENRIK_ANALYTICS_CACHE_TTL_SECONDS", "60"))
+)
+ANALYTICS_CACHE_MAX_ENTRIES = max(
+    1, int(os.getenv("HENRIK_ANALYTICS_CACHE_MAX_ENTRIES", "128"))
+)
+
+_AnalyticsRows = list[tuple[str, dict[str, Any], dict[str, Any]]]
+_ANALYTICS_QUERY_CACHE: OrderedDict[
+    tuple[str, str, str, str, str | None, int],
+    tuple[float, _AnalyticsRows, list[dict[str, Any]], int],
+] = OrderedDict()
 
 READ_ONLY_ANALYTICS = ToolAnnotations(
     readOnlyHint=True,
@@ -48,6 +62,10 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 def _clamp_match_count(value: int | None) -> int:
     return max(1, min(_as_int(value, 10), MAX_MATCH_COUNT))
+
+
+def _clear_analytics_cache() -> None:
+    _ANALYTICS_QUERY_CACHE.clear()
 
 
 def _clean_mode(mode: GameMode | str | None) -> str | None:
@@ -296,6 +314,13 @@ def _all_kills(match: dict[str, Any], rounds: list[dict[str, Any]]) -> list[dict
     return output
 
 
+def _killfeed_available(match: dict[str, Any], rounds: list[dict[str, Any]]) -> bool:
+    data = _data(match)
+    if isinstance(data.get("kills"), list):
+        return True
+    return any(isinstance(round_row.get("kills"), list) for round_row in rounds)
+
+
 def _kills_by_round(match: dict[str, Any], rounds: list[dict[str, Any]]) -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]], int]:
     kills = _all_kills(match, rounds)
     offset = _round_offset(rounds, kills)
@@ -477,6 +502,22 @@ async def _recent_full_matches(
     match_count: int,
 ) -> tuple[list[tuple[str, dict[str, Any], dict[str, Any]]], list[dict[str, Any]], int]:
     safe_count = _clamp_match_count(match_count)
+    cache_key = (
+        str(region).lower(),
+        name.lower(),
+        tag.lower(),
+        str(platform).lower(),
+        _clean_mode(mode),
+        safe_count,
+    )
+    cached = _ANALYTICS_QUERY_CACHE.get(cache_key)
+    if cached:
+        expires_at, cached_rows, cached_errors, cached_requested = cached
+        if expires_at > time.monotonic():
+            _ANALYTICS_QUERY_CACHE.move_to_end(cache_key)
+            return list(cached_rows), [dict(error) for error in cached_errors], cached_requested
+        _ANALYTICS_QUERY_CACHE.pop(cache_key, None)
+
     ids, errors = await _recent_match_ids(
         region=region,
         name=name,
@@ -505,6 +546,17 @@ async def _recent_full_matches(
 
         rows.append((match_id, match, player))
 
+    if rows and ANALYTICS_CACHE_TTL_SECONDS > 0:
+        _ANALYTICS_QUERY_CACHE[cache_key] = (
+            time.monotonic() + ANALYTICS_CACHE_TTL_SECONDS,
+            list(rows),
+            [dict(error) for error in errors],
+            safe_count,
+        )
+        _ANALYTICS_QUERY_CACHE.move_to_end(cache_key)
+        while len(_ANALYTICS_QUERY_CACHE) > ANALYTICS_CACHE_MAX_ENTRIES:
+            _ANALYTICS_QUERY_CACHE.popitem(last=False)
+
     return rows, errors, safe_count
 
 
@@ -529,9 +581,11 @@ def _benchmark_impact(value: float) -> str:
 
 
 def _confidence(matches_counted: int, errors: list[dict[str, Any]]) -> str:
-    if not matches_counted:
+    if matches_counted < 3:
         return "low"
-    return "medium" if errors else "high"
+    if matches_counted < 5 or errors:
+        return "medium"
+    return "high"
 
 
 def _plant_team(round_row: dict[str, Any]) -> str | None:
@@ -655,7 +709,7 @@ def register_analytics_tools(mcp: Any) -> None:
         """Aggregate KAST percentage across recent Henrik v4 match details.
 
         Heavy: fetches one full match payload per match. match_count is capped
-        at 10 to match Henrik v4 matchlist limits.
+        at 10 as a CSO rate-limit safety measure.
         """
         full_matches, errors, requested = await _recent_full_matches(
             region=region,
@@ -674,6 +728,9 @@ def register_analytics_tools(mcp: Any) -> None:
             player_team = _team_id(player)
             target_puuid, target_display = _target_tokens(player, name, tag)
             rounds = _rounds(match)
+            if not _killfeed_available(match, rounds):
+                errors.append({"match_id": match_id, "reason": "missing_killfeed"})
+                continue
             grouped_kills, _, offset = _kills_by_round(match, rounds)
 
             match_total = 0
@@ -764,7 +821,7 @@ def register_analytics_tools(mcp: Any) -> None:
         """Aggregate first-blood kills, deaths, and conversion across matches.
 
         Heavy: fetches one full match payload per match. match_count is capped
-        at 10 to match Henrik v4 matchlist limits.
+        at 10 as a CSO rate-limit safety measure.
         """
         full_matches, errors, requested = await _recent_full_matches(
             region=region,
@@ -785,6 +842,9 @@ def register_analytics_tools(mcp: Any) -> None:
             player_team = _team_id(player)
             target_puuid, target_display = _target_tokens(player, name, tag)
             rounds = _rounds(match)
+            if not _killfeed_available(match, rounds):
+                errors.append({"match_id": match_id, "reason": "missing_killfeed"})
+                continue
             grouped_kills, _, offset = _kills_by_round(match, rounds)
 
             match_fbk = match_fbd = match_fbk_w = match_fbd_w = 0
@@ -850,7 +910,7 @@ def register_analytics_tools(mcp: Any) -> None:
         """Track 1vX clutch attempts and wins across recent matches.
 
         Heavy: fetches one full match payload per match. match_count is capped
-        at 10 to match Henrik v4 matchlist limits.
+        at 10 as a CSO rate-limit safety measure.
         """
         full_matches, errors, requested = await _recent_full_matches(
             region=region,
@@ -875,6 +935,9 @@ def register_analytics_tools(mcp: Any) -> None:
                 continue
 
             rounds = _rounds(match)
+            if not _killfeed_available(match, rounds):
+                errors.append({"match_id": match_id, "reason": "missing_killfeed"})
+                continue
             grouped_kills, _, offset = _kills_by_round(match, rounds)
             match_attempts: Counter[int] = Counter()
             match_wins: Counter[int] = Counter()
@@ -965,7 +1028,7 @@ def register_analytics_tools(mcp: Any) -> None:
         """Compute a rolling 0-100 impact score across recent matches.
 
         Heavy: fetches one full match payload per match. match_count is capped
-        at 10 to match Henrik v4 matchlist limits.
+        at 10 as a CSO rate-limit safety measure.
         """
         full_matches, errors, requested = await _recent_full_matches(
             region=region,
@@ -988,21 +1051,28 @@ def register_analytics_tools(mcp: Any) -> None:
             deaths = max(stats["deaths"], 1)
             score = stats["score"]
             acs = score / rounds
-            adr = (damage_dealt or 0) / rounds
             kd = kills / deaths
             won = _player_team_won(match, player_team)
 
-            impact = round(
-                min(
-                    (acs / 300 * 35)
-                    + (adr / 150 * 30)
-                    + (min(kd / 1.5, 1.0) * 25)
-                    + (10 if won else 0),
-                    100.0,
-                ),
-                1,
-            )
-            scores.append(impact)
+            adr = damage_dealt / rounds if damage_dealt is not None else None
+            impact: float | None = None
+            score_status = "missing_damage"
+            if adr is not None:
+                impact = round(
+                    min(
+                        (acs / 300 * 35)
+                        + (adr / 150 * 30)
+                        + (min(kd / 1.5, 1.0) * 25)
+                        + (10 if won else 0),
+                        100.0,
+                    ),
+                    1,
+                )
+                scores.append(impact)
+                score_status = "scored"
+            else:
+                errors.append({"match_id": match_id, "reason": "missing_damage"})
+
             per_match.append(
                 {
                     "match_id": match_id,
@@ -1010,15 +1080,16 @@ def register_analytics_tools(mcp: Any) -> None:
                     "agent": agent_name(player),
                     "rounds": rounds,
                     "acs": round(acs, 1),
-                    "adr": round(adr, 1) if damage_dealt is not None else None,
+                    "adr": round(adr, 1) if adr is not None else None,
                     "kd": round(kd, 2),
                     "won": won,
                     "impact_score": impact,
                     "damage_available": damage_dealt is not None,
+                    "score_status": score_status,
                 }
             )
 
-        avg = round(sum(scores) / len(scores), 1) if scores else 0.0
+        avg = round(sum(scores) / len(scores), 1) if scores else None
         trend: str | None = None
         if len(scores) >= 4:
             half = len(scores) // 2
@@ -1034,10 +1105,11 @@ def register_analytics_tools(mcp: Any) -> None:
             "mode_filter": mode,
             "matches_requested": requested,
             "matches_analysed": len(per_match),
+            "matches_scored": len(scores),
             "avg_impact_score": avg,
             "trend": trend,
-            "benchmark": _benchmark_impact(avg),
-            "confidence": _confidence(len(per_match), errors),
+            "benchmark": _benchmark_impact(avg) if avg is not None else None,
+            "confidence": _confidence(len(scores), errors),
             "errors": errors,
             "formula": "Impact = ACS/300*35 + ADR/150*30 + capped KD/1.5*25 + win*10.",
             "per_match": per_match,
@@ -1055,7 +1127,7 @@ def register_analytics_tools(mcp: Any) -> None:
         """Break down ACS, ADR, K/D, and round win rate by attack/defense.
 
         Heavy: fetches one full match payload per match. match_count is capped
-        at 10 to match Henrik v4 matchlist limits.
+        at 10 as a CSO rate-limit safety measure.
         """
         full_matches, errors, requested = await _recent_full_matches(
             region=region,
@@ -1135,8 +1207,17 @@ def register_analytics_tools(mcp: Any) -> None:
 
         attack = _side_summary(aggregate["attack"])
         defense = _side_summary(aggregate["defense"])
-        acs_diff = round(attack["acs"] - defense["acs"], 1)
-        side_preference = "attack" if acs_diff > 0 else "defense" if acs_diff < 0 else "even"
+        has_both_sides = bool(attack["rounds"] and defense["rounds"])
+        acs_diff = round(attack["acs"] - defense["acs"], 1) if has_both_sides else None
+        side_preference = (
+            "attack"
+            if acs_diff is not None and acs_diff > 0
+            else "defense"
+            if acs_diff is not None and acs_diff < 0
+            else "even"
+            if acs_diff == 0
+            else "unknown"
+        )
 
         return {
             "player": f"{name}#{tag}",
@@ -1158,4 +1239,48 @@ def register_analytics_tools(mcp: Any) -> None:
                 "Side is confirmed from plant/defuse/time-out data when possible.",
                 "Half inference uses observed plant teams; unknown rounds are excluded from attack/defense stats.",
             ],
+        }
+
+    @mcp.tool(annotations=READ_ONLY_ANALYTICS)
+    async def get_player_analytics_bundle(
+        region: Region,
+        name: str,
+        tag: str,
+        platform: Platform = "pc",
+        match_count: int = 10,
+        mode: GameMode | None = "competitive",
+    ) -> dict[str, Any]:
+        """Return all CSO analytics using one shared history/detail fetch window.
+
+        Match payloads are reused across each calculation through the bounded
+        analytics cache, avoiding five independent Henrik request batches.
+        """
+        common = {
+            "region": region,
+            "name": name,
+            "tag": tag,
+            "platform": platform,
+            "match_count": match_count,
+            "mode": mode,
+        }
+        kast = await get_kast_aggregate(**common)
+        first_blood = await get_fb_rate_aggregate(**common)
+        clutch = await get_clutch_rate(**common)
+        impact = await get_multi_match_impact(**common)
+        side_split = await get_side_split_stats(**common)
+
+        return {
+            "player": f"{name}#{tag}",
+            "region": region,
+            "platform": platform,
+            "mode_filter": mode,
+            "matches_requested": _clamp_match_count(match_count),
+            "cache_window_seconds": ANALYTICS_CACHE_TTL_SECONDS,
+            "analytics": {
+                "kast": kast,
+                "first_blood": first_blood,
+                "clutch": clutch,
+                "impact": impact,
+                "side_split": side_split,
+            },
         }
