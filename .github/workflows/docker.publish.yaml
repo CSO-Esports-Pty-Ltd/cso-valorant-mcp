@@ -8,7 +8,6 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  IMAGE_NAME: ghcr.io/csoesports/cso-valorant-mcp
 
 jobs:
   ci:
@@ -117,6 +116,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # See the note in ci.yml: the image name must be derived from the
+      # repository owner, not hardcoded to the old personal-account namespace.
+      - name: Resolve image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${GITHUB_REPOSITORY##*/}" >> "$GITHUB_ENV"
 
       - name: Log in to the Container registry
         uses: docker/login-action@v4

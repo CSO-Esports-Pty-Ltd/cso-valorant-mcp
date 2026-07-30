@@ -17,7 +17,6 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  IMAGE_NAME: ghcr.io/csoesports/cso-valorant-mcp
 
 jobs:
   build-test-image:
@@ -27,6 +26,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Derived from the repository rather than hardcoded. The image name was
+      # pinned to ghcr.io/csoesports/... — a package owned by the CSOeSports
+      # personal account. When these repos were transferred to the
+      # CSO-Esports-Pty-Ltd organisation the packages stayed behind, and the
+      # org-scoped GITHUB_TOKEN could no longer push to them, so every publish
+      # failed with 403. Deriving the owner keeps this correct across future
+      # transfers. GHCR requires lowercase, hence ${VAR,,}.
+      - name: Resolve image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${GITHUB_REPOSITORY##*/}" >> "$GITHUB_ENV"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
