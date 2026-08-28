@@ -54,8 +54,6 @@ jobs:
                   "get_live_status",
                   "get_static_content",
                   "get_player_playtime",
-                  "get_player_playtime_audit",
-                  "get_weekly_activity_report",
                   "get_role_profile",
                   "get_consistency_score",
                   "get_trial_readiness_score",
@@ -74,15 +72,10 @@ jobs:
                   "get_bulk_player_backfill_aggregates",
                   "get_player_map_pool_last_n",
                   "get_player_agent_pool_last_n",
-                  "get_kast_aggregate",
-                  "get_fb_rate_aggregate",
-                  "get_clutch_rate",
-                  "get_multi_match_impact",
-                  "get_side_split_stats",
                   "get_player_analytics_bundle",
               }
               assert required_tools <= tool_names, required_tools - tool_names
-              assert len(tool_names) == 83, len(tool_names)
+              assert len(tool_names) == 54, len(tool_names)
               assert REDUNDANT_TOOL_NAMES.isdisjoint(tool_names)
               assert "valorant://agents" in resource_uris
               print(f"Registered {len(tools)} MCP tools")

@@ -12,7 +12,7 @@ class ToolVisibilityTests(unittest.TestCase):
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
 
-        self.assertEqual(len(names), 83)
+        self.assertEqual(len(names), 54)
         self.assertTrue(REDUNDANT_TOOL_NAMES.isdisjoint(names))
 
     def test_legacy_flag_restores_compatibility_tools(self) -> None:
@@ -26,7 +26,7 @@ class ToolVisibilityTests(unittest.TestCase):
                     "import asyncio; "
                     "from valorant_mcp_server.server import REDUNDANT_TOOL_NAMES, mcp; "
                     "names={tool.name for tool in asyncio.run(mcp.list_tools())}; "
-                    "assert len(names) == 105; "
+                    "assert len(names) == 76; "
                     "assert REDUNDANT_TOOL_NAMES <= names"
                 ),
             ],

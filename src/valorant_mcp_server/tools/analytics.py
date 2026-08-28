@@ -694,552 +694,552 @@ def _side_summary(bucket: dict[str, int]) -> dict[str, Any]:
     }
 
 
+async def get_kast_aggregate(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    match_count: int = 10,
+    mode: GameMode | None = "competitive",
+) -> dict[str, Any]:
+    """Aggregate KAST percentage across recent Henrik v4 match details.
+
+    Heavy: fetches one full match payload per match. match_count is capped
+    at 10 as a CSO rate-limit safety measure.
+    """
+    full_matches, errors, requested = await _recent_full_matches(
+        region=region,
+        name=name,
+        tag=tag,
+        platform=platform,
+        mode=mode,
+        match_count=match_count,
+    )
+
+    total_rounds = 0
+    kast_rounds = 0
+    per_match: list[dict[str, Any]] = []
+
+    for match_id, match, player in full_matches:
+        player_team = _team_id(player)
+        target_puuid, target_display = _target_tokens(player, name, tag)
+        rounds = _rounds(match)
+        if not _killfeed_available(match, rounds):
+            errors.append({"match_id": match_id, "reason": "missing_killfeed"})
+            continue
+        grouped_kills, _, offset = _kills_by_round(match, rounds)
+
+        match_total = 0
+        match_kast = 0
+        traded_rounds = 0
+
+        for index, round_row in enumerate(rounds):
+            round_key = _round_key(round_row, index, offset)
+            round_kills = grouped_kills.get(round_key, [])
+            stat = _find_round_stat(round_row, target_puuid, target_display)
+            match_total += 1
+
+            got_kill = _round_stat_kills(stat) > 0 or any(
+                _matches_target(_killer(kill), target_puuid, target_display)
+                for kill in round_kills
+            )
+            got_assist = _round_stat_assists(stat) > 0 or any(
+                any(_matches_target(assistant, target_puuid, target_display) for assistant in _assistants(kill))
+                for kill in round_kills
+            )
+            death = next(
+                (
+                    kill
+                    for kill in round_kills
+                    if _matches_target(_victim(kill), target_puuid, target_display)
+                ),
+                None,
+            )
+            survived = death is None
+            traded = False
+
+            if death and player_team:
+                death_time = _time_ms(death)
+                killer_person = _killer(death)
+                if death_time is not None:
+                    traded = any(
+                        _same_person(_victim(kill), killer_person)
+                        and _team_id(_killer(kill)) == player_team
+                        and (_time_ms(kill) is not None)
+                        and 0 < (_time_ms(kill) or 0) - death_time <= TRADE_WINDOW_MS
+                        for kill in round_kills
+                    )
+
+            if got_kill or got_assist or survived or traded:
+                match_kast += 1
+            if traded:
+                traded_rounds += 1
+
+        total_rounds += match_total
+        kast_rounds += match_kast
+        per_match.append(
+            {
+                "match_id": match_id,
+                "map": _map_name(match),
+                "rounds": match_total,
+                "kast_rounds": match_kast,
+                "traded_rounds": traded_rounds,
+                "kast_pct": round(match_kast / match_total * 100, 1) if match_total else 0,
+            }
+        )
+
+    kast_pct = round(kast_rounds / total_rounds * 100, 1) if total_rounds else 0
+    return {
+        "player": f"{name}#{tag}",
+        "region": region,
+        "platform": platform,
+        "mode_filter": mode,
+        "matches_requested": requested,
+        "matches_analysed": len(per_match),
+        "total_rounds": total_rounds,
+        "kast_rounds": kast_rounds,
+        "kast_pct": kast_pct,
+        "benchmark": _benchmark_kast(kast_pct),
+        "confidence": _confidence(len(per_match), errors),
+        "errors": errors,
+        "per_match": per_match,
+    }
+
+
+async def get_fb_rate_aggregate(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    match_count: int = 10,
+    mode: GameMode | None = "competitive",
+) -> dict[str, Any]:
+    """Aggregate first-blood kills, deaths, and conversion across matches.
+
+    Heavy: fetches one full match payload per match. match_count is capped
+    at 10 as a CSO rate-limit safety measure.
+    """
+    full_matches, errors, requested = await _recent_full_matches(
+        region=region,
+        name=name,
+        tag=tag,
+        platform=platform,
+        mode=mode,
+        match_count=match_count,
+    )
+
+    fb_kills = 0
+    fb_deaths = 0
+    fb_kill_wins = 0
+    fb_death_wins = 0
+    per_match: list[dict[str, Any]] = []
+
+    for match_id, match, player in full_matches:
+        player_team = _team_id(player)
+        target_puuid, target_display = _target_tokens(player, name, tag)
+        rounds = _rounds(match)
+        if not _killfeed_available(match, rounds):
+            errors.append({"match_id": match_id, "reason": "missing_killfeed"})
+            continue
+        grouped_kills, _, offset = _kills_by_round(match, rounds)
+
+        match_fbk = match_fbd = match_fbk_w = match_fbd_w = 0
+
+        for index, round_row in enumerate(rounds):
+            round_key = _round_key(round_row, index, offset)
+            round_kills = [kill for kill in grouped_kills.get(round_key, []) if not _is_suicide(kill)]
+            if not round_kills:
+                continue
+
+            first = round_kills[0]
+            won = bool(player_team and _round_winner(round_row) == player_team)
+            if _matches_target(_killer(first), target_puuid, target_display):
+                match_fbk += 1
+                match_fbk_w += 1 if won else 0
+            elif _matches_target(_victim(first), target_puuid, target_display):
+                match_fbd += 1
+                match_fbd_w += 1 if won else 0
+
+        fb_kills += match_fbk
+        fb_deaths += match_fbd
+        fb_kill_wins += match_fbk_w
+        fb_death_wins += match_fbd_w
+        per_match.append(
+            {
+                "match_id": match_id,
+                "map": _map_name(match),
+                "fb_kills": match_fbk,
+                "fb_deaths": match_fbd,
+                "fb_diff": match_fbk - match_fbd,
+                "fb_kill_round_win_rate": round(match_fbk_w / match_fbk * 100, 1) if match_fbk else None,
+                "fb_death_round_win_rate": round(match_fbd_w / match_fbd * 100, 1) if match_fbd else None,
+            }
+        )
+
+    return {
+        "player": f"{name}#{tag}",
+        "region": region,
+        "platform": platform,
+        "mode_filter": mode,
+        "matches_requested": requested,
+        "matches_analysed": len(per_match),
+        "fb_kills": fb_kills,
+        "fb_deaths": fb_deaths,
+        "fb_diff": fb_kills - fb_deaths,
+        "fb_kill_round_win_rate": round(fb_kill_wins / fb_kills * 100, 1) if fb_kills else None,
+        "fb_death_round_win_rate": round(fb_death_wins / fb_deaths * 100, 1) if fb_deaths else None,
+        "confidence": _confidence(len(per_match), errors),
+        "errors": errors,
+        "per_match": per_match,
+        "notes": ["First blood excludes suicide events when the payload identifies them."],
+    }
+
+
+async def get_clutch_rate(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    match_count: int = 10,
+    mode: GameMode | None = "competitive",
+) -> dict[str, Any]:
+    """Track 1vX clutch attempts and wins across recent matches.
+
+    Heavy: fetches one full match payload per match. match_count is capped
+    at 10 as a CSO rate-limit safety measure.
+    """
+    full_matches, errors, requested = await _recent_full_matches(
+        region=region,
+        name=name,
+        tag=tag,
+        platform=platform,
+        mode=mode,
+        match_count=match_count,
+    )
+
+    attempts: Counter[int] = Counter()
+    wins: Counter[int] = Counter()
+    per_match: list[dict[str, Any]] = []
+
+    for match_id, match, player in full_matches:
+        player_team = _team_id(player)
+        target_key = _person_key(player)
+        rosters = _team_rosters(match)
+        opponent_team = next((team for team in rosters if team != player_team), None)
+        if not player_team or not target_key or not opponent_team:
+            errors.append({"match_id": match_id, "reason": "missing_team_roster"})
+            continue
+
+        rounds = _rounds(match)
+        if not _killfeed_available(match, rounds):
+            errors.append({"match_id": match_id, "reason": "missing_killfeed"})
+            continue
+        grouped_kills, _, offset = _kills_by_round(match, rounds)
+        match_attempts: Counter[int] = Counter()
+        match_wins: Counter[int] = Counter()
+
+        for index, round_row in enumerate(rounds):
+            round_key = _round_key(round_row, index, offset)
+            alive_friendly = set(rosters[player_team])
+            alive_enemy = set(rosters[opponent_team])
+            clutch_size: int | None = None
+
+            for kill in grouped_kills.get(round_key, []):
+                victim_key = _person_key(_victim(kill))
+                if victim_key:
+                    alive_friendly.discard(victim_key)
+                    alive_enemy.discard(victim_key)
+
+                if (
+                    clutch_size is None
+                    and target_key in alive_friendly
+                    and len(alive_friendly) == 1
+                    and len(alive_enemy) >= 2
+                ):
+                    clutch_size = len(alive_enemy)
+
+            if clutch_size is None:
+                continue
+
+            match_attempts[clutch_size] += 1
+            attempts[clutch_size] += 1
+            if _round_winner(round_row) == player_team:
+                match_wins[clutch_size] += 1
+                wins[clutch_size] += 1
+
+        match_total = sum(match_attempts.values())
+        match_won = sum(match_wins.values())
+        per_match.append(
+            {
+                "match_id": match_id,
+                "map": _map_name(match),
+                "clutch_attempts": match_total,
+                "clutch_wins": match_won,
+                "conversion_rate": round(match_won / match_total * 100, 1) if match_total else 0,
+                "breakdown": {
+                    f"1v{size}": {
+                        "attempts": match_attempts[size],
+                        "wins": match_wins[size],
+                    }
+                    for size in sorted(match_attempts)
+                },
+            }
+        )
+
+    total_attempts = sum(attempts.values())
+    total_wins = sum(wins.values())
+    return {
+        "player": f"{name}#{tag}",
+        "region": region,
+        "platform": platform,
+        "mode_filter": mode,
+        "matches_requested": requested,
+        "matches_analysed": len(per_match),
+        "total_clutch_attempts": total_attempts,
+        "total_clutch_wins": total_wins,
+        "overall_conversion_rate": round(total_wins / total_attempts * 100, 1) if total_attempts else 0,
+        "by_situation": {
+            f"1v{size}": {
+                "attempts": attempts[size],
+                "wins": wins[size],
+                "conversion_rate": round(wins[size] / attempts[size] * 100, 1) if attempts[size] else 0,
+            }
+            for size in sorted(attempts)
+        },
+        "confidence": _confidence(len(per_match), errors),
+        "errors": errors,
+        "per_match": per_match,
+        "notes": ["Clutch detection replays death order and does not model revive edge cases."],
+    }
+
+
+async def get_multi_match_impact(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    match_count: int = 10,
+    mode: GameMode | None = "competitive",
+) -> dict[str, Any]:
+    """Compute a rolling 0-100 impact score across recent matches.
+
+    Heavy: fetches one full match payload per match. match_count is capped
+    at 10 as a CSO rate-limit safety measure.
+    """
+    full_matches, errors, requested = await _recent_full_matches(
+        region=region,
+        name=name,
+        tag=tag,
+        platform=platform,
+        mode=mode,
+        match_count=match_count,
+    )
+
+    scores: list[float] = []
+    per_match: list[dict[str, Any]] = []
+
+    for match_id, match, player in full_matches:
+        stats = player_stats(player)
+        player_team = _team_id(player)
+        rounds = _team_rounds(match, player_team)
+        damage_dealt = _player_damage_dealt(player)
+        kills = stats["kills"]
+        deaths = max(stats["deaths"], 1)
+        score = stats["score"]
+        acs = score / rounds
+        kd = kills / deaths
+        won = _player_team_won(match, player_team)
+
+        adr = damage_dealt / rounds if damage_dealt is not None else None
+        impact: float | None = None
+        score_status = "missing_damage"
+        if adr is not None:
+            impact = round(
+                min(
+                    (acs / 300 * 35)
+                    + (adr / 150 * 30)
+                    + (min(kd / 1.5, 1.0) * 25)
+                    + (10 if won else 0),
+                    100.0,
+                ),
+                1,
+            )
+            scores.append(impact)
+            score_status = "scored"
+        else:
+            errors.append({"match_id": match_id, "reason": "missing_damage"})
+
+        per_match.append(
+            {
+                "match_id": match_id,
+                "map": _map_name(match),
+                "agent": agent_name(player),
+                "rounds": rounds,
+                "acs": round(acs, 1),
+                "adr": round(adr, 1) if adr is not None else None,
+                "kd": round(kd, 2),
+                "won": won,
+                "impact_score": impact,
+                "damage_available": damage_dealt is not None,
+                "score_status": score_status,
+            }
+        )
+
+    avg = round(sum(scores) / len(scores), 1) if scores else None
+    trend: str | None = None
+    if len(scores) >= 4:
+        half = len(scores) // 2
+        recent = sum(scores[:half]) / half
+        older = sum(scores[half:]) / (len(scores) - half)
+        diff = recent - older
+        trend = "improving" if diff > 3 else "declining" if diff < -3 else "stable"
+
+    return {
+        "player": f"{name}#{tag}",
+        "region": region,
+        "platform": platform,
+        "mode_filter": mode,
+        "matches_requested": requested,
+        "matches_analysed": len(per_match),
+        "matches_scored": len(scores),
+        "avg_impact_score": avg,
+        "trend": trend,
+        "benchmark": _benchmark_impact(avg) if avg is not None else None,
+        "confidence": _confidence(len(scores), errors),
+        "errors": errors,
+        "formula": "Impact = ACS/300*35 + ADR/150*30 + capped KD/1.5*25 + win*10.",
+        "per_match": per_match,
+    }
+
+
+async def get_side_split_stats(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    match_count: int = 10,
+    mode: GameMode | None = "competitive",
+) -> dict[str, Any]:
+    """Break down ACS, ADR, K/D, and round win rate by attack/defense.
+
+    Heavy: fetches one full match payload per match. match_count is capped
+    at 10 as a CSO rate-limit safety measure.
+    """
+    full_matches, errors, requested = await _recent_full_matches(
+        region=region,
+        name=name,
+        tag=tag,
+        platform=platform,
+        mode=mode,
+        match_count=match_count,
+    )
+
+    aggregate = {"attack": _empty_side_bucket(), "defense": _empty_side_bucket()}
+    side_sources: Counter[str] = Counter()
+    unknown_rounds = 0
+    per_match: list[dict[str, Any]] = []
+
+    for match_id, match, player in full_matches:
+        player_team = _team_id(player)
+        target_puuid, target_display = _target_tokens(player, name, tag)
+        rounds = _rounds(match)
+        grouped_kills, _, offset = _kills_by_round(match, rounds)
+        teams = {team for team in _team_rosters(match) if team}
+        half_attack = _half_attack_teams(rounds, teams)
+        match_bucket = {"attack": _empty_side_bucket(), "defense": _empty_side_bucket()}
+        match_sources: Counter[str] = Counter()
+        match_unknown = 0
+
+        if not player_team:
+            errors.append({"match_id": match_id, "reason": "missing_player_team"})
+            continue
+
+        for index, round_row in enumerate(rounds):
+            side, source = _side_for_round(
+                round_row,
+                index=index,
+                player_team=player_team,
+                half_attack=half_attack,
+            )
+            match_sources[source] += 1
+            side_sources[source] += 1
+
+            if side not in ("attack", "defense"):
+                match_unknown += 1
+                unknown_rounds += 1
+                continue
+
+            stat = _find_round_stat(round_row, target_puuid, target_display)
+            if not stat:
+                continue
+
+            round_key = _round_key(round_row, index, offset)
+            deaths = sum(
+                1
+                for kill in grouped_kills.get(round_key, [])
+                if _matches_target(_victim(kill), target_puuid, target_display)
+            )
+            won = _round_winner(round_row) == player_team
+
+            for bucket in (match_bucket[side], aggregate[side]):
+                bucket["rounds"] += 1
+                bucket["score"] += _round_stat_score(stat)
+                bucket["damage"] += _round_stat_damage(stat)
+                bucket["kills"] += _round_stat_kills(stat)
+                bucket["deaths"] += deaths
+                bucket["rounds_won"] += 1 if won else 0
+                bucket["plant_tracked"] += 1 if source == "plant" else 0
+
+        per_match.append(
+            {
+                "match_id": match_id,
+                "map": _map_name(match),
+                "attack": _side_summary(match_bucket["attack"]),
+                "defense": _side_summary(match_bucket["defense"]),
+                "unknown_side_rounds": match_unknown,
+                "side_source_breakdown": dict(match_sources),
+            }
+        )
+
+    attack = _side_summary(aggregate["attack"])
+    defense = _side_summary(aggregate["defense"])
+    has_both_sides = bool(attack["rounds"] and defense["rounds"])
+    acs_diff = round(attack["acs"] - defense["acs"], 1) if has_both_sides else None
+    side_preference = (
+        "attack"
+        if acs_diff is not None and acs_diff > 0
+        else "defense"
+        if acs_diff is not None and acs_diff < 0
+        else "even"
+        if acs_diff == 0
+        else "unknown"
+    )
+
+    return {
+        "player": f"{name}#{tag}",
+        "region": region,
+        "platform": platform,
+        "mode_filter": mode,
+        "matches_requested": requested,
+        "matches_analysed": len(per_match),
+        "attack": attack,
+        "defense": defense,
+        "acs_differential": acs_diff,
+        "side_preference": side_preference,
+        "unknown_side_rounds": unknown_rounds,
+        "side_source_breakdown": dict(side_sources),
+        "confidence": _confidence(len(per_match), errors),
+        "errors": errors,
+        "per_match": per_match,
+        "notes": [
+            "Side is confirmed from plant/defuse/time-out data when possible.",
+            "Half inference uses observed plant teams; unknown rounds are excluded from attack/defense stats.",
+        ],
+    }
+
+
 def register_analytics_tools(mcp: Any) -> None:
     """Attach computed analytics tools to a FastMCP instance."""
-
-    @mcp.tool(annotations=READ_ONLY_ANALYTICS)
-    async def get_kast_aggregate(
-        region: Region,
-        name: str,
-        tag: str,
-        platform: Platform = "pc",
-        match_count: int = 10,
-        mode: GameMode | None = "competitive",
-    ) -> dict[str, Any]:
-        """Aggregate KAST percentage across recent Henrik v4 match details.
-
-        Heavy: fetches one full match payload per match. match_count is capped
-        at 10 as a CSO rate-limit safety measure.
-        """
-        full_matches, errors, requested = await _recent_full_matches(
-            region=region,
-            name=name,
-            tag=tag,
-            platform=platform,
-            mode=mode,
-            match_count=match_count,
-        )
-
-        total_rounds = 0
-        kast_rounds = 0
-        per_match: list[dict[str, Any]] = []
-
-        for match_id, match, player in full_matches:
-            player_team = _team_id(player)
-            target_puuid, target_display = _target_tokens(player, name, tag)
-            rounds = _rounds(match)
-            if not _killfeed_available(match, rounds):
-                errors.append({"match_id": match_id, "reason": "missing_killfeed"})
-                continue
-            grouped_kills, _, offset = _kills_by_round(match, rounds)
-
-            match_total = 0
-            match_kast = 0
-            traded_rounds = 0
-
-            for index, round_row in enumerate(rounds):
-                round_key = _round_key(round_row, index, offset)
-                round_kills = grouped_kills.get(round_key, [])
-                stat = _find_round_stat(round_row, target_puuid, target_display)
-                match_total += 1
-
-                got_kill = _round_stat_kills(stat) > 0 or any(
-                    _matches_target(_killer(kill), target_puuid, target_display)
-                    for kill in round_kills
-                )
-                got_assist = _round_stat_assists(stat) > 0 or any(
-                    any(_matches_target(assistant, target_puuid, target_display) for assistant in _assistants(kill))
-                    for kill in round_kills
-                )
-                death = next(
-                    (
-                        kill
-                        for kill in round_kills
-                        if _matches_target(_victim(kill), target_puuid, target_display)
-                    ),
-                    None,
-                )
-                survived = death is None
-                traded = False
-
-                if death and player_team:
-                    death_time = _time_ms(death)
-                    killer_person = _killer(death)
-                    if death_time is not None:
-                        traded = any(
-                            _same_person(_victim(kill), killer_person)
-                            and _team_id(_killer(kill)) == player_team
-                            and (_time_ms(kill) is not None)
-                            and 0 < (_time_ms(kill) or 0) - death_time <= TRADE_WINDOW_MS
-                            for kill in round_kills
-                        )
-
-                if got_kill or got_assist or survived or traded:
-                    match_kast += 1
-                if traded:
-                    traded_rounds += 1
-
-            total_rounds += match_total
-            kast_rounds += match_kast
-            per_match.append(
-                {
-                    "match_id": match_id,
-                    "map": _map_name(match),
-                    "rounds": match_total,
-                    "kast_rounds": match_kast,
-                    "traded_rounds": traded_rounds,
-                    "kast_pct": round(match_kast / match_total * 100, 1) if match_total else 0,
-                }
-            )
-
-        kast_pct = round(kast_rounds / total_rounds * 100, 1) if total_rounds else 0
-        return {
-            "player": f"{name}#{tag}",
-            "region": region,
-            "platform": platform,
-            "mode_filter": mode,
-            "matches_requested": requested,
-            "matches_analysed": len(per_match),
-            "total_rounds": total_rounds,
-            "kast_rounds": kast_rounds,
-            "kast_pct": kast_pct,
-            "benchmark": _benchmark_kast(kast_pct),
-            "confidence": _confidence(len(per_match), errors),
-            "errors": errors,
-            "per_match": per_match,
-        }
-
-    @mcp.tool(annotations=READ_ONLY_ANALYTICS)
-    async def get_fb_rate_aggregate(
-        region: Region,
-        name: str,
-        tag: str,
-        platform: Platform = "pc",
-        match_count: int = 10,
-        mode: GameMode | None = "competitive",
-    ) -> dict[str, Any]:
-        """Aggregate first-blood kills, deaths, and conversion across matches.
-
-        Heavy: fetches one full match payload per match. match_count is capped
-        at 10 as a CSO rate-limit safety measure.
-        """
-        full_matches, errors, requested = await _recent_full_matches(
-            region=region,
-            name=name,
-            tag=tag,
-            platform=platform,
-            mode=mode,
-            match_count=match_count,
-        )
-
-        fb_kills = 0
-        fb_deaths = 0
-        fb_kill_wins = 0
-        fb_death_wins = 0
-        per_match: list[dict[str, Any]] = []
-
-        for match_id, match, player in full_matches:
-            player_team = _team_id(player)
-            target_puuid, target_display = _target_tokens(player, name, tag)
-            rounds = _rounds(match)
-            if not _killfeed_available(match, rounds):
-                errors.append({"match_id": match_id, "reason": "missing_killfeed"})
-                continue
-            grouped_kills, _, offset = _kills_by_round(match, rounds)
-
-            match_fbk = match_fbd = match_fbk_w = match_fbd_w = 0
-
-            for index, round_row in enumerate(rounds):
-                round_key = _round_key(round_row, index, offset)
-                round_kills = [kill for kill in grouped_kills.get(round_key, []) if not _is_suicide(kill)]
-                if not round_kills:
-                    continue
-
-                first = round_kills[0]
-                won = bool(player_team and _round_winner(round_row) == player_team)
-                if _matches_target(_killer(first), target_puuid, target_display):
-                    match_fbk += 1
-                    match_fbk_w += 1 if won else 0
-                elif _matches_target(_victim(first), target_puuid, target_display):
-                    match_fbd += 1
-                    match_fbd_w += 1 if won else 0
-
-            fb_kills += match_fbk
-            fb_deaths += match_fbd
-            fb_kill_wins += match_fbk_w
-            fb_death_wins += match_fbd_w
-            per_match.append(
-                {
-                    "match_id": match_id,
-                    "map": _map_name(match),
-                    "fb_kills": match_fbk,
-                    "fb_deaths": match_fbd,
-                    "fb_diff": match_fbk - match_fbd,
-                    "fb_kill_round_win_rate": round(match_fbk_w / match_fbk * 100, 1) if match_fbk else None,
-                    "fb_death_round_win_rate": round(match_fbd_w / match_fbd * 100, 1) if match_fbd else None,
-                }
-            )
-
-        return {
-            "player": f"{name}#{tag}",
-            "region": region,
-            "platform": platform,
-            "mode_filter": mode,
-            "matches_requested": requested,
-            "matches_analysed": len(per_match),
-            "fb_kills": fb_kills,
-            "fb_deaths": fb_deaths,
-            "fb_diff": fb_kills - fb_deaths,
-            "fb_kill_round_win_rate": round(fb_kill_wins / fb_kills * 100, 1) if fb_kills else None,
-            "fb_death_round_win_rate": round(fb_death_wins / fb_deaths * 100, 1) if fb_deaths else None,
-            "confidence": _confidence(len(per_match), errors),
-            "errors": errors,
-            "per_match": per_match,
-            "notes": ["First blood excludes suicide events when the payload identifies them."],
-        }
-
-    @mcp.tool(annotations=READ_ONLY_ANALYTICS)
-    async def get_clutch_rate(
-        region: Region,
-        name: str,
-        tag: str,
-        platform: Platform = "pc",
-        match_count: int = 10,
-        mode: GameMode | None = "competitive",
-    ) -> dict[str, Any]:
-        """Track 1vX clutch attempts and wins across recent matches.
-
-        Heavy: fetches one full match payload per match. match_count is capped
-        at 10 as a CSO rate-limit safety measure.
-        """
-        full_matches, errors, requested = await _recent_full_matches(
-            region=region,
-            name=name,
-            tag=tag,
-            platform=platform,
-            mode=mode,
-            match_count=match_count,
-        )
-
-        attempts: Counter[int] = Counter()
-        wins: Counter[int] = Counter()
-        per_match: list[dict[str, Any]] = []
-
-        for match_id, match, player in full_matches:
-            player_team = _team_id(player)
-            target_key = _person_key(player)
-            rosters = _team_rosters(match)
-            opponent_team = next((team for team in rosters if team != player_team), None)
-            if not player_team or not target_key or not opponent_team:
-                errors.append({"match_id": match_id, "reason": "missing_team_roster"})
-                continue
-
-            rounds = _rounds(match)
-            if not _killfeed_available(match, rounds):
-                errors.append({"match_id": match_id, "reason": "missing_killfeed"})
-                continue
-            grouped_kills, _, offset = _kills_by_round(match, rounds)
-            match_attempts: Counter[int] = Counter()
-            match_wins: Counter[int] = Counter()
-
-            for index, round_row in enumerate(rounds):
-                round_key = _round_key(round_row, index, offset)
-                alive_friendly = set(rosters[player_team])
-                alive_enemy = set(rosters[opponent_team])
-                clutch_size: int | None = None
-
-                for kill in grouped_kills.get(round_key, []):
-                    victim_key = _person_key(_victim(kill))
-                    if victim_key:
-                        alive_friendly.discard(victim_key)
-                        alive_enemy.discard(victim_key)
-
-                    if (
-                        clutch_size is None
-                        and target_key in alive_friendly
-                        and len(alive_friendly) == 1
-                        and len(alive_enemy) >= 2
-                    ):
-                        clutch_size = len(alive_enemy)
-
-                if clutch_size is None:
-                    continue
-
-                match_attempts[clutch_size] += 1
-                attempts[clutch_size] += 1
-                if _round_winner(round_row) == player_team:
-                    match_wins[clutch_size] += 1
-                    wins[clutch_size] += 1
-
-            match_total = sum(match_attempts.values())
-            match_won = sum(match_wins.values())
-            per_match.append(
-                {
-                    "match_id": match_id,
-                    "map": _map_name(match),
-                    "clutch_attempts": match_total,
-                    "clutch_wins": match_won,
-                    "conversion_rate": round(match_won / match_total * 100, 1) if match_total else 0,
-                    "breakdown": {
-                        f"1v{size}": {
-                            "attempts": match_attempts[size],
-                            "wins": match_wins[size],
-                        }
-                        for size in sorted(match_attempts)
-                    },
-                }
-            )
-
-        total_attempts = sum(attempts.values())
-        total_wins = sum(wins.values())
-        return {
-            "player": f"{name}#{tag}",
-            "region": region,
-            "platform": platform,
-            "mode_filter": mode,
-            "matches_requested": requested,
-            "matches_analysed": len(per_match),
-            "total_clutch_attempts": total_attempts,
-            "total_clutch_wins": total_wins,
-            "overall_conversion_rate": round(total_wins / total_attempts * 100, 1) if total_attempts else 0,
-            "by_situation": {
-                f"1v{size}": {
-                    "attempts": attempts[size],
-                    "wins": wins[size],
-                    "conversion_rate": round(wins[size] / attempts[size] * 100, 1) if attempts[size] else 0,
-                }
-                for size in sorted(attempts)
-            },
-            "confidence": _confidence(len(per_match), errors),
-            "errors": errors,
-            "per_match": per_match,
-            "notes": ["Clutch detection replays death order and does not model revive edge cases."],
-        }
-
-    @mcp.tool(annotations=READ_ONLY_ANALYTICS)
-    async def get_multi_match_impact(
-        region: Region,
-        name: str,
-        tag: str,
-        platform: Platform = "pc",
-        match_count: int = 10,
-        mode: GameMode | None = "competitive",
-    ) -> dict[str, Any]:
-        """Compute a rolling 0-100 impact score across recent matches.
-
-        Heavy: fetches one full match payload per match. match_count is capped
-        at 10 as a CSO rate-limit safety measure.
-        """
-        full_matches, errors, requested = await _recent_full_matches(
-            region=region,
-            name=name,
-            tag=tag,
-            platform=platform,
-            mode=mode,
-            match_count=match_count,
-        )
-
-        scores: list[float] = []
-        per_match: list[dict[str, Any]] = []
-
-        for match_id, match, player in full_matches:
-            stats = player_stats(player)
-            player_team = _team_id(player)
-            rounds = _team_rounds(match, player_team)
-            damage_dealt = _player_damage_dealt(player)
-            kills = stats["kills"]
-            deaths = max(stats["deaths"], 1)
-            score = stats["score"]
-            acs = score / rounds
-            kd = kills / deaths
-            won = _player_team_won(match, player_team)
-
-            adr = damage_dealt / rounds if damage_dealt is not None else None
-            impact: float | None = None
-            score_status = "missing_damage"
-            if adr is not None:
-                impact = round(
-                    min(
-                        (acs / 300 * 35)
-                        + (adr / 150 * 30)
-                        + (min(kd / 1.5, 1.0) * 25)
-                        + (10 if won else 0),
-                        100.0,
-                    ),
-                    1,
-                )
-                scores.append(impact)
-                score_status = "scored"
-            else:
-                errors.append({"match_id": match_id, "reason": "missing_damage"})
-
-            per_match.append(
-                {
-                    "match_id": match_id,
-                    "map": _map_name(match),
-                    "agent": agent_name(player),
-                    "rounds": rounds,
-                    "acs": round(acs, 1),
-                    "adr": round(adr, 1) if adr is not None else None,
-                    "kd": round(kd, 2),
-                    "won": won,
-                    "impact_score": impact,
-                    "damage_available": damage_dealt is not None,
-                    "score_status": score_status,
-                }
-            )
-
-        avg = round(sum(scores) / len(scores), 1) if scores else None
-        trend: str | None = None
-        if len(scores) >= 4:
-            half = len(scores) // 2
-            recent = sum(scores[:half]) / half
-            older = sum(scores[half:]) / (len(scores) - half)
-            diff = recent - older
-            trend = "improving" if diff > 3 else "declining" if diff < -3 else "stable"
-
-        return {
-            "player": f"{name}#{tag}",
-            "region": region,
-            "platform": platform,
-            "mode_filter": mode,
-            "matches_requested": requested,
-            "matches_analysed": len(per_match),
-            "matches_scored": len(scores),
-            "avg_impact_score": avg,
-            "trend": trend,
-            "benchmark": _benchmark_impact(avg) if avg is not None else None,
-            "confidence": _confidence(len(scores), errors),
-            "errors": errors,
-            "formula": "Impact = ACS/300*35 + ADR/150*30 + capped KD/1.5*25 + win*10.",
-            "per_match": per_match,
-        }
-
-    @mcp.tool(annotations=READ_ONLY_ANALYTICS)
-    async def get_side_split_stats(
-        region: Region,
-        name: str,
-        tag: str,
-        platform: Platform = "pc",
-        match_count: int = 10,
-        mode: GameMode | None = "competitive",
-    ) -> dict[str, Any]:
-        """Break down ACS, ADR, K/D, and round win rate by attack/defense.
-
-        Heavy: fetches one full match payload per match. match_count is capped
-        at 10 as a CSO rate-limit safety measure.
-        """
-        full_matches, errors, requested = await _recent_full_matches(
-            region=region,
-            name=name,
-            tag=tag,
-            platform=platform,
-            mode=mode,
-            match_count=match_count,
-        )
-
-        aggregate = {"attack": _empty_side_bucket(), "defense": _empty_side_bucket()}
-        side_sources: Counter[str] = Counter()
-        unknown_rounds = 0
-        per_match: list[dict[str, Any]] = []
-
-        for match_id, match, player in full_matches:
-            player_team = _team_id(player)
-            target_puuid, target_display = _target_tokens(player, name, tag)
-            rounds = _rounds(match)
-            grouped_kills, _, offset = _kills_by_round(match, rounds)
-            teams = {team for team in _team_rosters(match) if team}
-            half_attack = _half_attack_teams(rounds, teams)
-            match_bucket = {"attack": _empty_side_bucket(), "defense": _empty_side_bucket()}
-            match_sources: Counter[str] = Counter()
-            match_unknown = 0
-
-            if not player_team:
-                errors.append({"match_id": match_id, "reason": "missing_player_team"})
-                continue
-
-            for index, round_row in enumerate(rounds):
-                side, source = _side_for_round(
-                    round_row,
-                    index=index,
-                    player_team=player_team,
-                    half_attack=half_attack,
-                )
-                match_sources[source] += 1
-                side_sources[source] += 1
-
-                if side not in ("attack", "defense"):
-                    match_unknown += 1
-                    unknown_rounds += 1
-                    continue
-
-                stat = _find_round_stat(round_row, target_puuid, target_display)
-                if not stat:
-                    continue
-
-                round_key = _round_key(round_row, index, offset)
-                deaths = sum(
-                    1
-                    for kill in grouped_kills.get(round_key, [])
-                    if _matches_target(_victim(kill), target_puuid, target_display)
-                )
-                won = _round_winner(round_row) == player_team
-
-                for bucket in (match_bucket[side], aggregate[side]):
-                    bucket["rounds"] += 1
-                    bucket["score"] += _round_stat_score(stat)
-                    bucket["damage"] += _round_stat_damage(stat)
-                    bucket["kills"] += _round_stat_kills(stat)
-                    bucket["deaths"] += deaths
-                    bucket["rounds_won"] += 1 if won else 0
-                    bucket["plant_tracked"] += 1 if source == "plant" else 0
-
-            per_match.append(
-                {
-                    "match_id": match_id,
-                    "map": _map_name(match),
-                    "attack": _side_summary(match_bucket["attack"]),
-                    "defense": _side_summary(match_bucket["defense"]),
-                    "unknown_side_rounds": match_unknown,
-                    "side_source_breakdown": dict(match_sources),
-                }
-            )
-
-        attack = _side_summary(aggregate["attack"])
-        defense = _side_summary(aggregate["defense"])
-        has_both_sides = bool(attack["rounds"] and defense["rounds"])
-        acs_diff = round(attack["acs"] - defense["acs"], 1) if has_both_sides else None
-        side_preference = (
-            "attack"
-            if acs_diff is not None and acs_diff > 0
-            else "defense"
-            if acs_diff is not None and acs_diff < 0
-            else "even"
-            if acs_diff == 0
-            else "unknown"
-        )
-
-        return {
-            "player": f"{name}#{tag}",
-            "region": region,
-            "platform": platform,
-            "mode_filter": mode,
-            "matches_requested": requested,
-            "matches_analysed": len(per_match),
-            "attack": attack,
-            "defense": defense,
-            "acs_differential": acs_diff,
-            "side_preference": side_preference,
-            "unknown_side_rounds": unknown_rounds,
-            "side_source_breakdown": dict(side_sources),
-            "confidence": _confidence(len(per_match), errors),
-            "errors": errors,
-            "per_match": per_match,
-            "notes": [
-                "Side is confirmed from plant/defuse/time-out data when possible.",
-                "Half inference uses observed plant teams; unknown rounds are excluded from attack/defense stats.",
-            ],
-        }
 
     @mcp.tool(annotations=READ_ONLY_ANALYTICS)
     async def get_player_analytics_bundle(
