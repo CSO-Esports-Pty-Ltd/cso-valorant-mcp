@@ -144,10 +144,13 @@ Simply add this to your MCP servers configuration menu or JSON:
 
 If you want to run the server from source, build the Docker image locally, or contribute to the project, follow these steps.
 
-The default MCP surface exposes 83 canonical tools. Redundant compatibility
-aliases and older endpoint wrappers are hidden from tool discovery but remain
-available in the codebase. Set `MCP_EXPOSE_LEGACY_TOOLS=true` to restore the
-full legacy 105-tool surface during a migration or rollback.
+The default MCP surface exposes 37 canonical tools. Tools that differed only
+by identifier (Riot ID vs PUUID) or output size have been merged into single
+tools taking `name`+`tag` or `puuid` plus a `compact` flag where relevant.
+Redundant compatibility aliases and older endpoint wrappers are hidden from
+tool discovery but remain available in the codebase. Set
+`MCP_EXPOSE_LEGACY_TOOLS=true` to restore the legacy 59-tool surface during a
+migration or rollback.
 
 ### Prerequisites
 - **Python 3.13+** and **uv** package manager

@@ -77,14 +77,12 @@ jobs:
                   "get_match_player_impact_summary",
                   "get_match_team_economy_summary",
                   "get_match_opening_duels",
-                  "get_match_history_v4_trimmed",
-                  "get_match_history_by_puuid_trimmed",
-                  "get_stored_matches_by_puuid_trimmed",
+                  "get_match_history",
+                  "get_stored_matches",
                   "get_match_player_stats_compact",
                   "get_player_backfill_aggregate",
                   "get_bulk_player_backfill_aggregates",
-                  "get_player_map_pool_last_n",
-                  "get_player_agent_pool_last_n",
+                  "get_player_pools",
                   "get_player_analytics_bundle",
               }
               assert required <= names, required - names
