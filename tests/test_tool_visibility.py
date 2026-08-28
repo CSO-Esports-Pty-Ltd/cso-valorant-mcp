@@ -26,7 +26,7 @@ class ToolVisibilityTests(unittest.TestCase):
                     "import asyncio; "
                     "from valorant_mcp_server.server import REDUNDANT_TOOL_NAMES, mcp; "
                     "names={tool.name for tool in asyncio.run(mcp.list_tools())}; "
-                    "assert len(names) == 59; "
+                    "assert len(names) == 56; "
                     "assert REDUNDANT_TOOL_NAMES <= names"
                 ),
             ],

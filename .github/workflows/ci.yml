@@ -84,8 +84,11 @@ jobs:
                   "get_bulk_player_backfill_aggregates",
                   "get_player_pools",
                   "get_player_analytics_bundle",
+                  "get_leaderboard",
+                  "get_esports_schedule",
               }
               assert required <= names, required - names
+              assert "get_esports_games_data" not in names
               print("valorant_mcp_server import ok")
 
           asyncio.run(main())

@@ -11,10 +11,10 @@ from valorant_mcp_server import client
 from valorant_mcp_server.literals import EsportsRegion, League
 
 
-async def get_esports_games_data(
+async def get_esports_schedule(
     region: EsportsRegion | None = None,
     league: list[League] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """
     Retrieve the current and upcoming schedule for Valorant esports matches.
 
@@ -26,7 +26,8 @@ async def get_esports_games_data(
         league: Optional list of specific leagues to filter by (e.g., ['vct_americas', 'vct_emea']).
 
     Returns:
-        List of esports scheduled matches, scores, and details.
+        List of esports scheduled matches, scores, and details. On failure a
+        structured error dict ({'error': True, ...}) is returned instead.
     """
     params: dict[str, Any] = {}
     if region:
