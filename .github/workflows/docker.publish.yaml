@@ -54,28 +54,29 @@ jobs:
                   "get_live_status",
                   "get_static_content",
                   "get_player_playtime",
-                  "get_role_profile",
-                  "get_consistency_score",
                   "get_trial_readiness_score",
                   "compare_players",
+                  "screen_candidates",
+                  "get_account",
+                  "get_premier_team",
+                  "get_premier_leaderboard",
+                  "get_stored_mmr_history",
                   "get_match_rounds_summary",
                   "get_match_round",
                   "get_match_events_compact",
                   "get_match_player_impact_summary",
                   "get_match_team_economy_summary",
                   "get_match_opening_duels",
-                  "get_match_history_v4_trimmed",
-                  "get_match_history_by_puuid_trimmed",
-                  "get_stored_matches_by_puuid_trimmed",
+                  "get_match_history",
+                  "get_stored_matches",
                   "get_match_player_stats_compact",
                   "get_player_backfill_aggregate",
                   "get_bulk_player_backfill_aggregates",
-                  "get_player_map_pool_last_n",
-                  "get_player_agent_pool_last_n",
+                  "get_player_pools",
                   "get_player_analytics_bundle",
               }
               assert required_tools <= tool_names, required_tools - tool_names
-              assert len(tool_names) == 54, len(tool_names)
+              assert len(tool_names) == 37, len(tool_names)
               assert REDUNDANT_TOOL_NAMES.isdisjoint(tool_names)
               assert "valorant://agents" in resource_uris
               print(f"Registered {len(tools)} MCP tools")
