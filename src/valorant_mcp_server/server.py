@@ -2774,7 +2774,8 @@ async def get_winrate_by_map(region: Region, name: str, tag: str, platform: Plat
     return result
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): used by
+# identify_consistent_players and get_trial_readiness_score.
 async def get_recent_form(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
     """Return recent performance form and simple trend indicators."""
     summary = await get_player_summary(region, name, tag, platform, match_count)
@@ -2796,46 +2797,6 @@ async def get_recent_form(region: Region, name: str, tag: str, platform: Platfor
             "Form is estimated from recent matches returned by the API.",
             "Use VOD review before making roster decisions."
         ],
-    }
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def analyze_match(region: Region, match_id: str, player_name: str | None = None, player_tag: str | None = None, puuid: str | None = None) -> dict[str, Any]:
-    """Analyze a match and optionally a specific player inside that match."""
-    full = await matches.get_match(region, match_id)
-    meta = _match_meta(full)
-    players = _player_rows_from_match(full)
-
-    top_players = []
-    for row in players:
-        st = _player_stats(row)
-        top_players.append({
-            "player": _player_identity(row),
-            "agent": _agent_name(row),
-            **st,
-            "kd": round(st["kills"] / max(st["deaths"], 1), 2),
-        })
-
-    top_players.sort(key=lambda x: (x["kills"], x["kd"]), reverse=True)
-
-    target = None
-    if player_name or puuid:
-        row = _find_player_in_match(full, name=player_name, tag=player_tag, puuid=puuid)
-        if row:
-            st = _player_stats(row)
-            target = {
-                "player": _player_identity(row),
-                "agent": _agent_name(row),
-                **st,
-                "kd": round(st["kills"] / max(st["deaths"], 1), 2),
-            }
-
-    return {
-        "metadata": meta,
-        "map": _map_name_from_match(full),
-        "players_count": len(players),
-        "top_players": top_players[:10],
-        "target_player": target,
     }
 
 
@@ -3347,251 +3308,6 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def audit_match_rounds(
-    region: Region,
-    match_id: str,
-    player_name: str | None = None,
-    player_tag: str | None = None,
-    puuid: str | None = None,
-) -> dict[str, Any]:
-    """Return a round-by-round audit breakdown for a Valorant match.
-
-    Optionally focuses on a specific player using either name+tag or puuid.
-    Includes round winner, win condition, kill flow, spike events, economy,
-    ability casts, and target-player round impact where available.
-    """
-    full = await matches.get_match(region, match_id)
-    meta = _match_meta(full)
-
-    rounds = (
-        _safe_get(full, "data", "rounds", default=None)
-        or full.get("rounds")
-        or []
-    )
-
-    if not isinstance(rounds, list):
-        rounds = []
-
-    audited_rounds: list[dict[str, Any]] = []
-
-    for index, round_data in enumerate(rounds, start=1):
-        if not isinstance(round_data, dict):
-            continue
-
-        kills = round_data.get("kills") or []
-        player_stats = round_data.get("player_stats") or []
-
-        kill_flow: list[dict[str, Any]] = []
-        first_kill: dict[str, Any] | None = None
-
-        if isinstance(kills, list):
-            for kill in kills:
-                if not isinstance(kill, dict):
-                    continue
-
-                finishing_damage = kill.get("finishing_damage") or {}
-                weapon = (
-                    kill.get("damage_weapon_name")
-                    or finishing_damage.get("damage_item")
-                    or finishing_damage.get("damage_item_name")
-                )
-
-                kill_event = {
-                    "time_in_round_ms": kill.get("kill_time_in_round"),
-                    "killer": (
-                        kill.get("killer_display_name")
-                        or kill.get("killer_puuid")
-                    ),
-                    "victim": (
-                        kill.get("victim_display_name")
-                        or kill.get("victim_puuid")
-                    ),
-                    "assistants": (
-                        kill.get("assistant_display_names")
-                        or kill.get("assistants")
-                        or []
-                    ),
-                    "weapon": weapon,
-                    "damage_type": finishing_damage.get("damage_type"),
-                    "is_headshot": finishing_damage.get("damage_type") == "HeadShot",
-                }
-
-                kill_flow.append(kill_event)
-
-            kill_flow.sort(
-                key=lambda item: (
-                    item["time_in_round_ms"] is None,
-                    item["time_in_round_ms"] or 0,
-                )
-            )
-            first_kill = kill_flow[0] if kill_flow else None
-
-        plant_events = round_data.get("plant_events") or round_data.get("plant")
-        defuse_events = round_data.get("defuse_events") or round_data.get("defuse")
-
-        target_round_stats = None
-
-        if isinstance(player_stats, list):
-            for player in player_stats:
-                if not isinstance(player, dict):
-                    continue
-
-                found_target = False
-
-                if puuid and player.get("puuid") == puuid:
-                    found_target = True
-                elif player_name and player_tag:
-                    display_name = str(
-                        player.get("player_display_name")
-                        or player.get("name")
-                        or ""
-                    ).lower()
-                    display_tag = str(
-                        player.get("player_display_tag")
-                        or player.get("tag")
-                        or ""
-                    ).lower()
-
-                    found_target = (
-                        display_name == player_name.lower()
-                        and display_tag == player_tag.lower()
-                    )
-
-                if not found_target:
-                    continue
-
-                economy = player.get("economy") or {}
-                ability_casts = player.get("ability_casts") or {}
-
-                target_round_stats = {
-                    "player": (
-                        player.get("player_display_name")
-                        or player.get("name")
-                        or player.get("puuid")
-                    ),
-                    "puuid": player.get("puuid"),
-                    "score": player.get("score"),
-                    "damage": player.get("damage"),
-                    "kills": len(player.get("kills") or []),
-                    "economy": {
-                        "loadout_value": economy.get("loadout_value"),
-                        "remaining_credits": economy.get("remaining"),
-                        "spent": economy.get("spent"),
-                        "weapon": (
-                            (economy.get("weapon") or {}).get("name")
-                            if isinstance(economy.get("weapon"), dict)
-                            else economy.get("weapon")
-                        ),
-                        "armor": (
-                            (economy.get("armor") or {}).get("name")
-                            if isinstance(economy.get("armor"), dict)
-                            else economy.get("armor")
-                        ),
-                    },
-                    "ability_casts": ability_casts,
-                }
-                break
-
-        audited_rounds.append(
-            {
-                "round_number": index,
-                "winning_team": round_data.get("winning_team"),
-                "end_type": round_data.get("end_type"),
-                "bomb_planted": bool(plant_events),
-                "bomb_defused": bool(defuse_events),
-                "plant_events": plant_events,
-                "defuse_events": defuse_events,
-                "first_kill": first_kill,
-                "kill_count": len(kill_flow),
-                "kill_flow": kill_flow,
-                "target_player": target_round_stats,
-            }
-        )
-
-    return {
-        "match_id": match_id,
-        "map": _map_name_from_match(full),
-        "metadata": meta,
-        "rounds_count": len(audited_rounds),
-        "rounds": audited_rounds,
-        "notes": [
-            "Round audit is based on the Henrik match payload.",
-            "Field availability may vary by Henrik API version and match type.",
-        ],
-    }
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def detect_common_mistakes(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
-    """Infer common performance issues from recent stats. This is statistical, not VOD-level certainty."""
-    summary = await get_player_summary(region, name, tag, platform, match_count)
-    totals = summary["totals"]
-    kd = summary["kd"]
-    kda = summary["kda"]
-
-    mistakes = []
-    if kd < 0.85:
-        mistakes.append("Low K/D: review first-death patterns, duel selection and trade spacing.")
-    if kda < 1.3:
-        mistakes.append("Low KDA: improve utility timing, trade participation and survival after contact.")
-    if totals["assists"] < max(match_count * 3, 1):
-        mistakes.append("Low assists: likely low utility conversion or limited teamfight support.")
-    if len(summary.get("agents", {})) > 4:
-        mistakes.append("Wide agent spread: role identity may be unclear across recent matches.")
-
-    return {
-        "player": f"{name}#{tag}",
-        "matches_checked": summary["matches_checked"],
-        "kd": kd,
-        "kda": kda,
-        "mistakes": mistakes or ["No obvious stat-level red flags found. Use VOD review for deeper diagnosis."],
-    }
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def suggest_training_focus(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
-    """Suggest training focus areas based on recent stat profile."""
-    issues = await detect_common_mistakes(region, name, tag, platform, match_count)
-    focuses = []
-
-    for mistake in issues["mistakes"]:
-        if "Low K/D" in mistake:
-            focuses.append("Death review: tag every first death, dry peek and isolated duel.")
-        if "Low KDA" in mistake:
-            focuses.append("Trade spacing drill: enter/follow timing and 2vX refrag setups.")
-        if "Low assists" in mistake:
-            focuses.append("Utility impact review: track flashes, scans, smokes and damage utility that directly enable kills.")
-        if "agent spread" in mistake:
-            focuses.append("Role lock: commit to 1 primary role and 2 agents for the next block.")
-
-    return {
-        "player": f"{name}#{tag}",
-        "training_focus": focuses or ["Maintain current mechanics block; add one VOD review focused on mid-round decisions."],
-        "source": "Derived from recent match stats. Confirm with coach/VOD review.",
-    }
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def find_players_by_rank_range(region: Region, min_rank_rating: int, max_rank_rating: int, platform: Platform = "pc", page: int = 0, size: int = 100) -> dict[str, Any]:
-    """Search one leaderboard page for players within a leaderboard rank rating range."""
-    board = await leaderboard.get_leaderboard(region, platform, None, None, None, None, size, page)
-    entries = _safe_get(board, "data", "players", default=None) or board.get("players") or board.get("data") or []
-    if isinstance(entries, dict):
-        entries = list(entries.values())
-
-    found = []
-    for row in entries if isinstance(entries, list) else []:
-        rr = row.get("ranked_rating") or row.get("rr") or row.get("rating") or row.get("leaderboardRank")
-        try:
-            rr_num = int(rr)
-        except Exception:
-            continue
-        if min_rank_rating <= rr_num <= max_rank_rating:
-            found.append(row)
-
-    return {"page": page, "size": size, "matches": found}
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def find_high_kd_players(region: Region, candidates: list[dict[str, str]], platform: Platform = "pc", min_kd: float = 1.2, match_count: int = 10) -> list[dict[str, Any]]:
     """Evaluate supplied candidate players and return those above a K/D threshold."""
     found = []
@@ -3735,52 +3451,25 @@ async def get_account_by_puuid_v2(puuid: str, force: bool = False) -> dict[str, 
 
 # Content
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): used by get_static_content
+# and the static-content MCP resources below.
 async def get_valorant_content(locale: str | None = None) -> dict[str, Any]:
     return await _henrik_get("/valorant/v1/content", {"locale": locale})
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helpers (no longer registered tools): used by the MCP resources below.
 async def get_agents(locale: str | None = None) -> dict[str, Any]:
     return _content_slice(await get_valorant_content(locale), "characters")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_maps(locale: str | None = None) -> dict[str, Any]:
     return _content_slice(await get_valorant_content(locale), "maps")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_skins(locale: str | None = None) -> dict[str, Any]:
-    return _content_slice(await get_valorant_content(locale), "skins")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_sprays(locale: str | None = None) -> dict[str, Any]:
-    return _content_slice(await get_valorant_content(locale), "sprays")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_buddies(locale: str | None = None) -> dict[str, Any]:
-    return _content_slice(await get_valorant_content(locale), "charms")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_player_cards(locale: str | None = None) -> dict[str, Any]:
-    return _content_slice(await get_valorant_content(locale), "playerCards")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_player_titles(locale: str | None = None) -> dict[str, Any]:
-    return _content_slice(await get_valorant_content(locale), "playerTitles")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_seasons(locale: str | None = None) -> dict[str, Any]:
     return _content_slice(await get_valorant_content(locale), "acts")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_game_modes(locale: str | None = None) -> dict[str, Any]:
     return _content_slice(await get_valorant_content(locale), "gameModes")
 
@@ -3906,11 +3595,6 @@ async def get_match_details_v4(region: Region, match_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_match_details_v2(match_id: str) -> dict[str, Any]:
-    return await _henrik_get(f"/valorant/v2/match/{match_id}")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_stored_matches(
     region: Region,
     name: str,
@@ -3989,14 +3673,6 @@ async def get_mmr_history_by_puuid(region: Region, puuid: str, platform: Platfor
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_stored_mmr_history(region: Region, name: str, tag: str, page: int | None = None, size: int | None = None) -> dict[str, Any]:
-    return await _henrik_get(
-        f"/valorant/v1/stored-mmr-history/{region}/{name}/{tag}",
-        {"page": page, "size": size},
-    )
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_stored_mmr_history_v2(
     region: Region,
     name: str,
@@ -4051,21 +3727,6 @@ async def get_leaderboard_v3(
             "start_index": start_index,
         },
     )
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_leaderboard_player_by_name(region: Region, name: str, tag: str, platform: Platform = "pc") -> dict[str, Any]:
-    return await get_leaderboard_v3(region, platform, None, name, tag, None, None, 1, None)
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_leaderboard_player_by_puuid(region: Region, puuid: str, platform: Platform = "pc") -> dict[str, Any]:
-    return await get_leaderboard_v3(region, platform, puuid, None, None, None, None, 1, None)
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_leaderboard_by_season(region: Region, season_short: str, platform: Platform = "pc", size: int | None = None, start_index: int | None = None) -> dict[str, Any]:
-    return await get_leaderboard_v3(region, platform, None, None, None, season_short, None, size, start_index)
 
 
 # Premier
@@ -4152,11 +3813,6 @@ async def get_server_status(region: Region) -> dict[str, Any]:
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_valorant_version(region: Region) -> dict[str, Any]:
     return await _henrik_get(f"/valorant/v1/version/{region}")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_store_featured_v1() -> dict[str, Any]:
-    return await _henrik_get("/valorant/v1/store-featured")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
@@ -4679,52 +4335,8 @@ async def get_player_playtime(
     }
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_player_playtime_audit(
-    region: Region,
-    name: str,
-    tag: str,
-    platform: Platform = "pc",
-    days: int = 7,
-    mode: str | None = None,
-    page_size: int = 10,
-    max_pages: int = 10,
-) -> dict[str, Any]:
-    """Return auditable match-by-match evidence for player playtime.
-
-    Use this when coaches need to verify exactly which matches were counted,
-    skipped, and why.
-    """
-    report = await get_player_playtime(
-        region=region,
-        name=name,
-        tag=tag,
-        platform=platform,
-        days=days,
-        mode=mode,
-        page_size=page_size,
-        max_pages=max_pages,
-    )
-
-    return {
-        "player": report.get("player"),
-        "region": report.get("region"),
-        "platform": report.get("platform"),
-        "window": report.get("window"),
-        "mode_filter": report.get("mode_filter"),
-        "total_playtime_hhmmss": report.get("total_playtime_hhmmss"),
-        "matches_counted": report.get("matches_counted"),
-        "matches_skipped": report.get("matches_skipped"),
-        "agent_counts": report.get("agent_counts", {}),
-        "confidence": report.get("confidence"),
-        "counted_matches": report.get("matches", []),
-        "skipped_matches": report.get("skipped", []),
-        "agent_lookup_errors": report.get("agent_lookup_errors", []),
-        "notes": report.get("notes", []),
-    }
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): used by
+# get_academy_weekly_playtime_report.
 async def get_weekly_activity_report(
     region: Region,
     name: str,

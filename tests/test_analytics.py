@@ -90,7 +90,7 @@ class AnalyticsTests(unittest.IsolatedAsyncioTestCase):
         fetch = AsyncMock(return_value=([("match-1", match, player)], [], 1))
 
         with patch.object(analytics, "_recent_full_matches", fetch):
-            result = await self.registry.tools["get_multi_match_impact"](
+            result = await analytics.get_multi_match_impact(
                 region="eu", name="Player", tag="TAG"
             )
 
@@ -105,7 +105,7 @@ class AnalyticsTests(unittest.IsolatedAsyncioTestCase):
         fetch = AsyncMock(return_value=([("match-1", match, player)], [], 1))
 
         with patch.object(analytics, "_recent_full_matches", fetch):
-            result = await self.registry.tools["get_kast_aggregate"](
+            result = await analytics.get_kast_aggregate(
                 region="eu", name="Player", tag="TAG"
             )
 
