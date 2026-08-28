@@ -1,5 +1,6 @@
-"""Shared Literal aliases used across Valorant MCP tools and server."""
+"""Shared Literal aliases and validation patterns used across Valorant MCP tools."""
 
+import re
 from typing import Literal
 
 Region = Literal["eu", "na", "latam", "br", "ap", "kr"]
@@ -19,53 +20,19 @@ GameMode = Literal[
     "unrated",
 ]
 
-MapName = Literal[
-    "Ascent",
-    "Split",
-    "Abyss",
-    "Bind",
-    "Breeze",
-    "Corrode",
-    "District",
-    "Fracture",
-    "Haven",
-    "Icebox",
-    "Kasbah",
-    "Lotus",
-    "Piazza",
-    "Pearl",
-    "Sunset",
-]
+# Map names are deliberately NOT a Literal: Riot ships new maps regularly and
+# a stale enum would reject them. Tools accept any string and pass it through
+# to the Henrik API (e.g. 'Ascent', 'Bind', 'Corrode').
 
-SeasonShort = Literal[
-    "e1a1",
-    "e1a2",
-    "e1a3",
-    "e2a1",
-    "e2a2",
-    "e2a3",
-    "e3a1",
-    "e3a2",
-    "e3a3",
-    "e4a1",
-    "e4a2",
-    "e4a3",
-    "e5a1",
-    "e5a2",
-    "e5a3",
-    "e6a1",
-    "e6a2",
-    "e6a3",
-    "e7a1",
-    "e7a2",
-    "e7a3",
-    "e8a1",
-    "e8a2",
-    "e8a3",
-    "e9a1",
-    "e9a2",
-    "e9a3",
-]
+# Season short codes: 'e{episode}a{act}' for the Episode era (e1a1 .. e9a3)
+# and 'v{year}a{act}' (e.g. 'v25a1') for the V25+ season format. Validated by
+# pattern instead of a Literal so new seasons work without a code change.
+SEASON_SHORT_PATTERN = re.compile(r"^(e\d+a\d+|v\d{2,4}a\d+)$", re.IGNORECASE)
+
+
+def is_valid_season_short(value: str) -> bool:
+    """Return True when value looks like a Henrik season short code."""
+    return bool(SEASON_SHORT_PATTERN.match(str(value).strip()))
 
 EsportsRegion = Literal[
     "international",

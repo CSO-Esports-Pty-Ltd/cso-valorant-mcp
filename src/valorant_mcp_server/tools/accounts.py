@@ -9,6 +9,7 @@ Endpoints used:
 from typing import Any
 
 from valorant_mcp_server import client
+from valorant_mcp_server.riot_id import riot_id_error, riot_id_path
 
 
 async def get_account(
@@ -33,10 +34,16 @@ async def get_account(
           - platforms (list[str]): platforms the account is linked to
           - updated_at (str): human-readable update timestamp
     """
+    try:
+        safe_name, safe_tag = riot_id_path(name, tag)
+    except ValueError as exc:
+        return riot_id_error(exc, name=name, tag=tag)
     params: dict[str, Any] = {}
     if force_update:
         params["force"] = "true"
-    data = await client.get(f"/valorant/v2/account/{name}/{tag}", params=params)
+    data = await client.get(
+        f"/valorant/v2/account/{safe_name}/{safe_tag}", params=params
+    )
     return data.get("data", data)
 
 

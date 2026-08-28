@@ -74,8 +74,11 @@ jobs:
                   "get_bulk_player_backfill_aggregates",
                   "get_player_pools",
                   "get_player_analytics_bundle",
+                  "get_leaderboard",
+                  "get_esports_schedule",
               }
               assert required_tools <= tool_names, required_tools - tool_names
+              assert "get_esports_games_data" not in tool_names
               assert len(tool_names) == 37, len(tool_names)
               assert REDUNDANT_TOOL_NAMES.isdisjoint(tool_names)
               assert "valorant://agents" in resource_uris

@@ -13,7 +13,8 @@ from collections import OrderedDict
 from typing import Any
 
 from valorant_mcp_server import client
-from valorant_mcp_server.literals import GameMode, MapName, Platform, Region
+from valorant_mcp_server.literals import GameMode, Platform, Region
+from valorant_mcp_server.riot_id import riot_id_error, riot_id_path
 
 
 _MATCH_CACHE_TTL_SECONDS = max(
@@ -61,10 +62,10 @@ async def get_match_history(
     tag: str,
     platform: Platform = "pc",
     mode: GameMode | None = None,
-    map_name: MapName | None = None,
+    map_name: str | None = None,
     size: int | None = None,
     start: int | None = None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Retrieve recent match history for a player by Riot ID.
 
     Args:
@@ -73,14 +74,22 @@ async def get_match_history(
         tag: The player's tag line without '#'.
         platform: Platform to query — 'pc' (default) or 'console'.
         mode: Optional game mode filter (e.g. 'competitive', 'unrated').
-        map_name: Optional map_name name filter (e.g. 'Ascent', 'Bind').
+        map_name: Optional map name filter (e.g. 'Ascent', 'Bind'); passed
+            through to the API unvalidated so newly released maps work.
         size: Number of matches to return (the API defaults to 10).
         start: Optional v4 pagination start index.
 
     Returns:
-        A list of match summary objects. Each entry includes match metadata,
-        teams, and per-player stats for that match.
+        A list of match summary objects on success. Each entry includes match
+        metadata, teams, and per-player stats for that match. On failure a
+        structured error dict ({'error': True, ...}) is returned instead of a
+        list — callers must check the type before slicing.
     """
+    try:
+        safe_name, safe_tag = riot_id_path(name, tag)
+    except ValueError as exc:
+        return riot_id_error(exc, name=name, tag=tag)
+
     params: dict[str, Any] = {}
     if mode:
         params["mode"] = mode
@@ -92,7 +101,8 @@ async def get_match_history(
         params["start"] = max(0, start)
 
     data = await client.get(
-        f"/valorant/v4/matches/{region}/{platform}/{name}/{tag}", params=params
+        f"/valorant/v4/matches/{region}/{platform}/{safe_name}/{safe_tag}",
+        params=params,
     )
     return data.get("data", data)
 

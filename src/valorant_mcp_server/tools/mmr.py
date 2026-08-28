@@ -11,6 +11,7 @@ from typing import Any
 
 from valorant_mcp_server import client
 from valorant_mcp_server.literals import Platform, Region
+from valorant_mcp_server.riot_id import riot_id_error, riot_id_path
 
 
 async def get_mmr(
@@ -31,7 +32,13 @@ async def get_mmr(
         account, peak, currentposition
         and seasonal mmr info for the given player#tag.
     """
-    data = await client.get(f"/valorant/v3/mmr/{region}/{platform}/{name}/{tag}")
+    try:
+        safe_name, safe_tag = riot_id_path(name, tag)
+    except ValueError as exc:
+        return riot_id_error(exc, name=name, tag=tag)
+    data = await client.get(
+        f"/valorant/v3/mmr/{region}/{platform}/{safe_name}/{safe_tag}"
+    )
     return data.get("data", data)
 
 

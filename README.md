@@ -149,8 +149,9 @@ by identifier (Riot ID vs PUUID) or output size have been merged into single
 tools taking `name`+`tag` or `puuid` plus a `compact` flag where relevant.
 Redundant compatibility aliases and older endpoint wrappers are hidden from
 tool discovery but remain available in the codebase. Set
-`MCP_EXPOSE_LEGACY_TOOLS=true` to restore the legacy 59-tool surface during a
-migration or rollback.
+`MCP_EXPOSE_LEGACY_TOOLS=true` to restore the legacy 56-tool surface during a
+migration or rollback. The esports schedule tool is named
+`get_esports_schedule` (formerly `get_esports_games_data`).
 
 ### Prerequisites
 - **Python 3.13+** and **uv** package manager

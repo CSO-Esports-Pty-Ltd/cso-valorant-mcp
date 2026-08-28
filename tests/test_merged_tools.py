@@ -244,7 +244,7 @@ class PlayerPoolsTests(unittest.IsolatedAsyncioTestCase):
         ]
         fetch = AsyncMock(return_value=(rows, None))
         with patch.object(server, "_player_last_n_rows", fetch):
-            result = await server.get_player_pools("eu", "TenZ", "SEN", n_matches=3)
+            result = await server.get_player_pools("eu", "TenZ", "SEN", match_count=3)
 
         fetch.assert_awaited_once_with("eu", "TenZ", "SEN", "pc", 3)
         self.assertEqual(3, result["matches_counted"])

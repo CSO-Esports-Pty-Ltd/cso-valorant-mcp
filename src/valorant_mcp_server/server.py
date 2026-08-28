@@ -34,12 +34,14 @@ from starlette.responses import JSONResponse, Response
 
 from valorant_mcp_server.literals import (
     GameMode,
-    MapName,
     Platform,
     Region,
-    SeasonShort,
     EsportsRegion,
     League,
+)
+from valorant_mcp_server.riot_id import (
+    riot_id_error as _riot_id_error,
+    riot_id_path as _riot_id_path,
 )
 from valorant_mcp_server.cso_utils import (
     cso_agent_counts_from_report as _cso_agent_counts_from_report,
@@ -243,8 +245,8 @@ def _compact_match_history_response(
         "matches_returned": len(trimmed),
         "matches": trimmed,
         "notes": [
-            "Trimmed match-history response for Notion/LLM agents.",
-            "Use get_match_details_v4 or round-summary tools only for a selected match_id.",
+            "Trimmed match-history response: small payload, at most 5 matches.",
+            "Use get_match or the round-summary tools only for a selected match_id.",
         ],
     }
 
@@ -1106,9 +1108,6 @@ REDUNDANT_TOOL_NAMES = frozenset(
         "get_account_v1",
         "get_account_v2",
         "get_agent_stats",
-        "get_esports_schedule",
-        "get_esports_schedule_by_league",
-        "get_esports_schedule_by_region",
         "get_leaderboard_v3",
         "get_match_details",
         "get_match_details_v4",
@@ -2264,7 +2263,7 @@ async def get_match_history(
     puuid: str | None = None,
     platform: Platform = "pc",
     mode: GameMode | None = None,
-    map_name: MapName | None = None,
+    map_name: str | None = None,
     size: int | None = None,
     start: int | None = None,
     compact: bool = True,
@@ -2291,7 +2290,8 @@ async def get_match_history(
         puuid: Player unique identifier — mutually exclusive with name/tag.
         platform: 'pc' (default) or 'console'.
         mode: Optional game mode filter (e.g. 'competitive', 'unrated').
-        map_name: Optional map name filter (e.g. 'Ascent').
+        map_name: Optional map name filter (e.g. 'Ascent'); any string is
+            passed through so newly released maps work.
         size: Number of matches to return. Compact responses default to 3 and
             are hard-capped at 5; full responses use the Henrik v4 default
             of 10 when unset.
@@ -2333,7 +2333,13 @@ async def get_match(
     """Retrieve full details for a single Valorant match by match ID.
 
     Returns complete data: metadata, all players (agents, stats, loadouts),
-    round-by-round results, kill feed, and economy.
+    round-by-round results, kill feed, and economy. The payload is very large
+    (often hundreds of KB); prefer the compact derived tools first —
+    get_match_player_stats_compact for player stats/scoreboard,
+    get_match_rounds_summary / get_match_round for round data,
+    get_match_team_economy_summary or get_match_opening_duels for specifics —
+    and use this tool only when the full raw payload is genuinely needed.
+    Results are served from a short-lived in-process cache.
 
     Args:
         region: Server region — eu, na, latam, br, ap, or kr.
@@ -2465,7 +2471,7 @@ async def _player_last_n_rows(
     name: str,
     tag: str,
     platform: Platform,
-    n_matches: int,
+    match_count: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     history = await matches.get_match_history(
         region,
@@ -2473,7 +2479,7 @@ async def _player_last_n_rows(
         tag,
         platform=platform,
         mode="competitive",
-        size=max(1, min(n_matches, 20)),
+        size=max(1, min(match_count, 20)),
     )
     if not isinstance(history, list):
         return [], {
@@ -2483,7 +2489,7 @@ async def _player_last_n_rows(
         }
 
     rows: list[dict[str, Any]] = []
-    for item in history[: max(1, min(n_matches, 20))]:
+    for item in history[: max(1, min(match_count, 20))]:
         match_id = _extract_match_id(item)
         if not match_id:
             continue
@@ -2520,28 +2526,28 @@ async def get_player_pools(
     name: str,
     tag: str,
     platform: Platform = "pc",
-    n_matches: int = 10,
+    match_count: int = 10,
 ) -> dict[str, Any]:
     """Summarize player performance by map AND by agent over the last N competitive matches.
 
     Fetches the player's recent competitive matches once and returns two
     rollups of the same rows: map_pool (per-map matches, winrate, K/D,
-    average score) and agent_pool (the same metrics per agent). n_matches is
-    clamped to 1-20. Heavy: fetches one full match payload per counted match.
+    average score) and agent_pool (the same metrics per agent). match_count
+    is clamped to 1-20. Heavy: fetches one full match payload per counted match.
 
     Args:
         region: Server region — eu, na, latam, br, ap, or kr.
         name: In-game name.
         tag: Tag line without '#'.
         platform: 'pc' (default) or 'console'.
-        n_matches: Number of recent competitive matches to scan (max 20).
+        match_count: Number of recent competitive matches to scan (max 20).
     """
-    rows, error = await _player_last_n_rows(region, name, tag, platform, n_matches)
+    rows, error = await _player_last_n_rows(region, name, tag, platform, match_count)
     return {
         "region": region,
         "player": f"{name}#{tag}",
         "platform": platform,
-        "matches_requested": max(1, min(n_matches, 20)),
+        "matches_requested": max(1, min(match_count, 20)),
         "matches_counted": len(rows),
         "history_error": error,
         "map_pool": _rollup_history(rows, group_by="map"),
@@ -2568,14 +2574,14 @@ async def get_leaderboard(
     name: str | None = None,
     tag: str | None = None,
     puuid: str | None = None,
-    season_short: SeasonShort | None = None,
+    season_short: str | None = None,
     size: int | None = None,
-    page: int | None = None,
+    start: int | None = None,
 ) -> dict[str, Any]:
     """Retrieve the competitive leaderboard for a region and platform.
 
     Filter by a specific player using name+tag OR puuid (not both).
-    Optionally filter by season (e.g. 'e9a1') for historical data.
+    Optionally filter by season for historical data.
 
     Args:
         region: Server region — eu, na, latam, br, ap, or kr.
@@ -2583,12 +2589,13 @@ async def get_leaderboard(
         name: Filter to a specific player name (requires tag).
         tag: Filter to a specific player tag (requires name).
         puuid: Filter by PUUID — mutually exclusive with name/tag.
-        season_short: Season short code (e.g. 'e9a1') for historical leaderboards.
-        size: Number of entries to return.
-        page: Pagination offset (0-indexed).
+        season_short: Season code — 'e{episode}a{act}' (e.g. 'e9a3') or
+            'v{year}a{act}' (e.g. 'v25a1') for historical leaderboards.
+        size: Number of entries to return (default 100, max 1000).
+        start: 0-indexed entry offset for pagination (v3 start_index).
     """
     return await leaderboard.get_leaderboard(
-        region, platform, name, tag, puuid, season_short, size, page
+        region, platform, name, tag, puuid, season_short, size, start
     )
 
 
@@ -2605,20 +2612,22 @@ async def get_leaderboard(
         openWorldHint=True,
     )
 )
-async def get_esports_games_data(
+async def get_esports_schedule(
     region: EsportsRegion | None = None,
     league: list[League] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Retrieve the current and upcoming schedule for Valorant esports matches.
 
-    Can be filtered by a specific broader region or by an explicit list
-    of leagues/tournaments.
+    Returns a list of scheduled/completed pro matches with league, teams,
+    start time, and scores. Can be filtered by a broader region or by an
+    explicit list of leagues/tournaments. On failure a structured error dict
+    ({'error': True, ...}) is returned instead of a list.
 
     Args:
         region: Optional region to filter by (e.g., 'international', 'north america', 'emea').
         league: Optional list of specific leagues to filter by (e.g., ['vct_americas', 'vct_emea']).
     """
-    return await esports.get_esports_games_data(region, league)
+    return await esports.get_esports_schedule(region, league)
 
 
 
@@ -2714,14 +2723,29 @@ async def get_player_summary(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_weekly_performance(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 20) -> dict[str, Any]:
-    """Estimate recent weekly performance from the latest matches available through match history."""
+    """Legacy alias of get_player_summary (hidden by default).
+
+    Despite the name it aggregates over get_player_summary's default 30-day
+    window, not a strict week. Prefer get_player_summary directly.
+    """
     return await get_player_summary(region, name, tag, platform, match_count)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_agent_stats(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 20) -> dict[str, Any]:
-    """Aggregate recent K/D/A by agent."""
+    """Aggregate recent K/D/A by agent (legacy tool, hidden by default).
+
+    Prefer get_player_pools, which returns the same per-agent rollup plus the
+    per-map rollup from one fetch. Heavy: fetches one full match payload per
+    counted match.
+    """
     history = await matches.get_match_history(region, name, tag, platform, None, None, match_count)
+    if not isinstance(history, list):
+        return {
+            "error": True,
+            "message": "Could not retrieve player match history",
+            "response": history,
+        }
     result: dict[str, dict[str, Any]] = {}
 
     for item in history[:match_count]:
@@ -2750,8 +2774,19 @@ async def get_agent_stats(region: Region, name: str, tag: str, platform: Platfor
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_winrate_by_map(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 20) -> dict[str, Any]:
-    """Aggregate recent map winrate where match team result is available."""
+    """Aggregate recent map winrate (legacy tool, hidden by default).
+
+    Prefer get_player_pools, which returns the same per-map rollup plus the
+    per-agent rollup from one fetch. Heavy: fetches one full match payload per
+    counted match.
+    """
     history = await matches.get_match_history(region, name, tag, platform, None, None, match_count)
+    if not isinstance(history, list):
+        return {
+            "error": True,
+            "message": "Could not retrieve player match history",
+            "response": history,
+        }
     result: dict[str, dict[str, Any]] = {}
 
     for item in history[:match_count]:
@@ -2785,7 +2820,8 @@ async def get_winrate_by_map(region: Region, name: str, tag: str, platform: Plat
 async def get_recent_form(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
     """Return recent performance form and simple trend indicators."""
     summary = await get_player_summary(region, name, tag, platform, match_count)
-    kd = summary.get("kd", 0)
+    raw_kd = summary.get("kd")
+    kd = float(raw_kd) if isinstance(raw_kd, (int, float)) else 0.0
 
     if kd >= 1.25:
         form = "hot"
@@ -2819,9 +2855,13 @@ async def get_match_player_stats_compact(
 
     Includes team win boolean plus head/body/leg shot counts when the Henrik
     payload exposes them. Pass a PUUID or name+tag for one target player, or
-    include_all_players=True for a compact scoreboard.
+    include_all_players=True for a compact scoreboard. Prefer this over
+    get_match when you only need player stats. Match details are served from
+    the shared match-detail cache.
     """
-    full = await get_match_details_v4(region, match_id)
+    full = await matches.get_match(region, match_id)
+    if isinstance(full, dict) and full.get("error"):
+        return full
     base = _compact_match_history_item(full, region=region, target_puuid=puuid)
 
     if include_all_players:
@@ -2869,11 +2909,12 @@ async def get_player_backfill_aggregate(
     include_rr: bool = False,
     include_weekly_playtime: bool = False,
 ) -> dict[str, Any]:
-    """Return compact Notion backfill aggregates for one player and date window.
+    """Return compact per-player stat aggregates for a date window.
 
+    Small-payload response designed for automated reporting/backfill jobs.
     Output includes ACS, ADR, K/D, HS%, win rate, and weekly match count where
     source data is available. Missing metrics are returned as null rather than
-    guessed.
+    guessed. Set include_matches=True to also return the per-match rows.
     """
     player_label = f"{name}#{tag}" if name and tag else puuid or "unknown"
     rr_summary: dict[str, Any] | None = None
@@ -2947,7 +2988,11 @@ async def get_bulk_player_backfill_aggregates(
     include_rr: bool = False,
     include_weekly_playtime: bool = False,
 ) -> dict[str, Any]:
-    """Return bulk-safe compact Notion backfill aggregates for multiple players."""
+    """Return compact stat aggregates for up to 25 players in one call.
+
+    Bulk variant of get_player_backfill_aggregate with per-player scan limits;
+    each player entry needs name+tag or puuid. Small payload per player.
+    """
     max_players = 25
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -3021,7 +3066,7 @@ async def get_bulk_player_backfill_aggregates(
         "results": results,
         "errors": errors,
         "notes": [
-            "Bulk-safe response for Notion backfill.",
+            "Bulk-safe compact aggregate response.",
             "Null metrics mean the source payload did not expose enough data; values are not invented.",
         ],
     }
@@ -3407,46 +3452,90 @@ async def get_rank_history(
     puuid: str,
     platform: Platform = "pc",
 ) -> dict[str, Any]:
-    """Retrieve Valorant ranked rating history using the shared CSO rank-history tool name."""
+    """Retrieve a player's ranked rating (RR) change history by PUUID.
+
+    Returns one entry per recent competitive match with tier, RR change, map,
+    and date (raw Henrik v2 mmr-history envelope). For history going further
+    back, use get_stored_mmr_history.
+
+    Args:
+        region: Server region — eu, na, latam, br, ap, or kr.
+        puuid: Player unique identifier (get it via get_account).
+        platform: 'pc' (default) or 'console'.
+    """
     return await get_mmr_history_by_puuid(region, puuid, platform)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_match_details(region: Region, match_id: str) -> dict[str, Any]:
-    """Retrieve Valorant match details using the shared CSO match-details tool name."""
+    """Legacy alias for full v4 match details (hidden by default).
+
+    Returns the raw Henrik envelope, uncached. Prefer get_match (cached) or
+    the compact per-match tools such as get_match_player_stats_compact.
+    """
     return await get_match_details_v4(region, match_id)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_live_status(region: Region) -> dict[str, Any]:
-    """Retrieve Valorant platform status using the shared CSO status tool name."""
+    """Retrieve current Valorant platform status for a region.
+
+    Returns active maintenances and incidents from Riot's status API (v1
+    status endpoint). For matchmaking queue availability use get_queue_status.
+
+    Args:
+        region: Server region — eu, na, latam, br, ap, or kr.
+    """
     return await get_server_status(region)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_static_content(content: str = "agents", locale: str | None = None) -> dict[str, Any]:
-    """Retrieve static Valorant content using the shared CSO static-content tool name."""
-    content_map = {
-        "agents": "characters",
-        "characters": "characters",
-        "maps": "maps",
-        "skins": "skins",
-        "sprays": "sprays",
-        "buddies": "buddies",
-        "player_cards": "playerCards",
-        "player_titles": "playerTitles",
-        "seasons": "seasons",
-        "game_modes": "gameModes",
+    """Retrieve one slice of Valorant static content (agents, maps, skins, ...).
+
+    Returns {version, <slice>: [...]} from the Henrik v1 content payload,
+    which is cached per locale in-process. Supported content values: agents,
+    maps, skins, sprays, buddies, player_cards, player_titles, seasons,
+    game_modes. Note that 'skins' is a very large list. 'buddies' maps to the
+    upstream 'charms' key and 'seasons' to 'acts' (with a defensive fallback
+    if the upstream key name differs).
+
+    Args:
+        content: Which slice to return (default 'agents').
+        locale: Optional locale code (e.g. 'en-US') for localized names.
+    """
+    # Candidate upstream keys per content type, in preference order. Riot's
+    # content payload calls weapon buddies "charms" and seasons "acts"; the
+    # secondary keys are kept as a defensive fallback.
+    content_map: dict[str, tuple[str, ...]] = {
+        "agents": ("characters",),
+        "characters": ("characters",),
+        "maps": ("maps",),
+        "skins": ("skins",),
+        "sprays": ("sprays",),
+        "buddies": ("charms", "buddies"),
+        "charms": ("charms", "buddies"),
+        "player_cards": ("playerCards",),
+        "player_titles": ("playerTitles",),
+        "seasons": ("acts", "seasons"),
+        "acts": ("acts", "seasons"),
+        "game_modes": ("gameModes",),
     }
-    payload = await get_valorant_content(locale)
-    key = content_map.get(content)
-    if not key:
+    keys = content_map.get(content)
+    if not keys:
         return {
             "error": True,
             "message": f"Unsupported content type: {content}",
             "supported_content": sorted(content_map),
         }
-    return _content_slice(payload, key)
+    payload = await get_valorant_content(locale)
+    if isinstance(payload, dict) and payload.get("error"):
+        return payload
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    for key in keys:
+        if isinstance(data, dict) and data.get(key):
+            return _content_slice(payload, key)
+    return _content_slice(payload, keys[0])
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
@@ -3459,9 +3548,12 @@ async def get_player_activity_report(
     mode: str | None = None,
     page_size: int = 10,
     max_pages: int = 10,
+    include_matches: bool = False,
 ) -> dict[str, Any]:
-    """CSO player activity report using the shared activity-report tool name."""
-    return await get_player_playtime(region, name, tag, platform, days, mode, page_size, max_pages)
+    """Legacy alias of get_player_playtime (hidden by default). Prefer get_player_playtime."""
+    return await get_player_playtime(
+        region, name, tag, platform, days, mode, page_size, max_pages, include_matches
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3472,30 +3564,77 @@ async def get_player_activity_report(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_account_v1(name: str, tag: str, force: bool = False) -> dict[str, Any]:
-    return await _henrik_get(f"/valorant/v1/account/{name}/{tag}", {"force": force})
+    """Raw Henrik v1 account lookup by Riot ID (legacy, hidden by default).
+
+    Returns the raw v1 envelope (puuid, region, account level, card). Prefer
+    get_account, which uses the newer v2 endpoint.
+    """
+    try:
+        safe_name, safe_tag = _riot_id_path(name, tag)
+    except ValueError as exc:
+        return _riot_id_error(exc, name=name, tag=tag)
+    return await _henrik_get(f"/valorant/v1/account/{safe_name}/{safe_tag}", {"force": force})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_account_v2(name: str, tag: str, force: bool = False) -> dict[str, Any]:
-    return await _henrik_get(f"/valorant/v2/account/{name}/{tag}", {"force": force})
+    """Raw Henrik v2 account lookup by Riot ID (legacy, hidden by default).
+
+    Returns the raw v2 envelope. Prefer get_account, which returns the same
+    data unwrapped and also accepts a puuid.
+    """
+    try:
+        safe_name, safe_tag = _riot_id_path(name, tag)
+    except ValueError as exc:
+        return _riot_id_error(exc, name=name, tag=tag)
+    return await _henrik_get(f"/valorant/v2/account/{safe_name}/{safe_tag}", {"force": force})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_account_by_puuid_v1(puuid: str, force: bool = False) -> dict[str, Any]:
+    """Raw Henrik v1 account lookup by PUUID (legacy, hidden by default). Prefer get_account."""
     return await _henrik_get(f"/valorant/v1/by-puuid/account/{puuid}", {"force": force})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_account_by_puuid_v2(puuid: str, force: bool = False) -> dict[str, Any]:
+    """Raw Henrik v2 account lookup by PUUID (legacy, hidden by default). Prefer get_account."""
     return await _henrik_get(f"/valorant/v2/by-puuid/account/{puuid}", {"force": force})
 
 
 # Content
 
+# The v1 content payload only changes with game versions, so successful
+# responses are cached in-process per locale.
+_CONTENT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CONTENT_CACHE_TTL_SECONDS = max(
+    0.0, float(os.getenv("HENRIK_CONTENT_CACHE_TTL_SECONDS", "21600"))
+)
+
+
+def clear_content_cache() -> None:
+    _CONTENT_CACHE.clear()
+
+
 # Internal helper (no longer a registered tool): used by get_static_content
 # and the static-content MCP resources below.
 async def get_valorant_content(locale: str | None = None) -> dict[str, Any]:
-    return await _henrik_get("/valorant/v1/content", {"locale": locale})
+    cache_key = str(locale or "").lower()
+    entry = _CONTENT_CACHE.get(cache_key)
+    if entry and entry[0] > time.monotonic():
+        return entry[1]
+
+    payload = await _henrik_get("/valorant/v1/content", {"locale": locale})
+    if (
+        _CONTENT_CACHE_TTL_SECONDS > 0
+        and isinstance(payload, dict)
+        and not payload.get("error")
+    ):
+        _CONTENT_CACHE[cache_key] = (
+            time.monotonic() + _CONTENT_CACHE_TTL_SECONDS,
+            payload,
+        )
+    return payload
 
 
 # Internal helpers (no longer registered tools): used by the MCP resources below.
@@ -3548,8 +3687,17 @@ async def get_match_history_v4(
     size: int | None = None,
     start: int | None = None,
 ) -> dict[str, Any]:
+    """Raw Henrik v4 match history by Riot ID (legacy, hidden by default).
+
+    Returns the raw v4 envelope with full match summaries — a large payload.
+    Prefer get_match_history, which adds puuid support and a compact mode.
+    """
+    try:
+        safe_name, safe_tag = _riot_id_path(name, tag)
+    except ValueError as exc:
+        return _riot_id_error(exc, name=name, tag=tag)
     return await _henrik_get(
-        f"/valorant/v4/matches/{region}/{platform}/{name}/{tag}",
+        f"/valorant/v4/matches/{region}/{platform}/{safe_name}/{safe_tag}",
         {"mode": mode, "map": map_name, "size": size, "start": start},
     )
 
@@ -3583,14 +3731,18 @@ async def get_match_history_v4_trimmed(
     size: int | None = 3,
     start: int | None = None,
 ) -> dict[str, Any]:
-    """Return a compact v4 match-history page by Riot ID for Notion/LLM agents.
+    """Return a compact, small-payload v4 match-history page by Riot ID.
 
     The response is hard-capped to five matches and removes the large nested
     match/player payload. Fetch detailed data only after selecting a match_id.
     """
+    try:
+        safe_name, safe_tag = _riot_id_path(name, tag)
+    except ValueError as exc:
+        return _riot_id_error(exc, name=name, tag=tag)
     safe_size = _clamped_matchlist_size(size)
     payload = await _henrik_get(
-        f"/valorant/v4/matches/{region}/{platform}/{name}/{tag}",
+        f"/valorant/v4/matches/{region}/{platform}/{safe_name}/{safe_tag}",
         {"mode": mode, "map": map_name, "size": safe_size, "start": start},
     )
     return _compact_match_history_response(
@@ -3613,7 +3765,7 @@ async def get_match_history_by_puuid_trimmed(
     size: int | None = 3,
     start: int | None = None,
 ) -> dict[str, Any]:
-    """Return a compact v4 match-history page by PUUID for Notion/LLM agents.
+    """Return a compact, small-payload v4 match-history page by PUUID.
 
     Backs the compact puuid path of the merged get_match_history tool.
     The response is hard-capped to five matches.
@@ -3635,6 +3787,11 @@ async def get_match_history_by_puuid_trimmed(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_match_details_v4(region: Region, match_id: str) -> dict[str, Any]:
+    """Raw, uncached Henrik v4 match detail (legacy, hidden by default).
+
+    Returns the raw v4 envelope — a very large payload. Prefer get_match
+    (cached, unwrapped) or the compact per-match tools.
+    """
     return await _henrik_get(f"/valorant/v4/match/{region}/{match_id}")
 
 
@@ -3680,7 +3837,11 @@ async def get_stored_matches(
     if puuid:
         path = f"/valorant/v1/by-puuid/stored-matches/{region}/{puuid}"
     else:
-        path = f"/valorant/v1/stored-matches/{region}/{name}/{tag}"
+        try:
+            safe_name, safe_tag = _riot_id_path(name, tag)
+        except ValueError as exc:
+            return _riot_id_error(exc, name=name, tag=tag)
+        path = f"/valorant/v1/stored-matches/{region}/{safe_name}/{safe_tag}"
     if not compact:
         return await _henrik_get(
             path, {"mode": mode, "map": map_name, "page": page, "size": size}
@@ -3703,21 +3864,41 @@ async def get_stored_matches(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_mmr_v3(region: Region, name: str, tag: str, platform: Platform = "pc") -> dict[str, Any]:
-    return await _henrik_get(f"/valorant/v3/mmr/{region}/{platform}/{name}/{tag}")
+    """Raw Henrik v3 MMR/rank lookup by Riot ID (legacy, hidden by default).
+
+    Returns the raw v3 envelope with current tier, RR, peak, and seasonal MMR.
+    Prefer get_rank, which also accepts a puuid.
+    """
+    try:
+        safe_name, safe_tag = _riot_id_path(name, tag)
+    except ValueError as exc:
+        return _riot_id_error(exc, name=name, tag=tag)
+    return await _henrik_get(f"/valorant/v3/mmr/{region}/{platform}/{safe_name}/{safe_tag}")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_mmr_by_puuid_v3(region: Region, puuid: str, platform: Platform = "pc") -> dict[str, Any]:
+    """Raw Henrik v3 MMR/rank lookup by PUUID (legacy, hidden by default). Prefer get_rank."""
     return await _henrik_get(f"/valorant/v3/by-puuid/mmr/{region}/{platform}/{puuid}")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_mmr_history_v1(region: Region, name: str, tag: str) -> dict[str, Any]:
-    return await _henrik_get(f"/valorant/v1/mmr-history/{region}/{name}/{tag}")
+    """Raw Henrik v1 RR-change history by Riot ID (legacy, hidden by default).
+
+    Returns per-match RR changes. Prefer get_rank_history (by puuid) or
+    get_stored_mmr_history for long-term history.
+    """
+    try:
+        safe_name, safe_tag = _riot_id_path(name, tag)
+    except ValueError as exc:
+        return _riot_id_error(exc, name=name, tag=tag)
+    return await _henrik_get(f"/valorant/v1/mmr-history/{region}/{safe_name}/{safe_tag}")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_mmr_history_by_puuid(region: Region, puuid: str, platform: Platform = "pc") -> dict[str, Any]:
+    """Raw Henrik v2 RR-change history by PUUID (legacy, hidden by default). Prefer get_rank_history."""
     return await _henrik_get(f"/valorant/v2/by-puuid/mmr-history/{region}/{platform}/{puuid}")
 
 
@@ -3755,7 +3936,11 @@ async def get_stored_mmr_history(
     if puuid:
         path = f"/valorant/v2/by-puuid/stored-mmr-history/{region}/{platform}/{puuid}"
     else:
-        path = f"/valorant/v2/stored-mmr-history/{region}/{platform}/{name}/{tag}"
+        try:
+            safe_name, safe_tag = _riot_id_path(name, tag)
+        except ValueError as exc:
+            return _riot_id_error(exc, name=name, tag=tag)
+        path = f"/valorant/v2/stored-mmr-history/{region}/{platform}/{safe_name}/{safe_tag}"
     return await _henrik_get(path, {"page": page, "size": size})
 
 
@@ -3773,6 +3958,12 @@ async def get_leaderboard_v3(
     size: int | None = None,
     start_index: int | None = None,
 ) -> dict[str, Any]:
+    """Raw Henrik v3 leaderboard wrapper (legacy, hidden by default).
+
+    Passes all query params (including season_id and start_index) straight
+    through and returns the raw envelope. Prefer get_leaderboard, which adds
+    validation and a sane default page size.
+    """
     return await _henrik_get(
         f"/valorant/v3/leaderboard/{region}/{platform}",
         {
@@ -3835,16 +4026,36 @@ async def get_premier_team(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def search_premier_teams(name: str | None = None, tag: str | None = None, division: int | None = None) -> dict[str, Any]:
+    """Search Valorant Premier teams by name, tag, and/or division.
+
+    Returns matching teams with their ids; use a returned team id with
+    get_premier_team for full details or match history.
+
+    Args:
+        name: Optional Premier team name to search for.
+        tag: Optional Premier team tag to search for.
+        division: Optional division number to filter by.
+    """
     return await _henrik_get("/valorant/v1/premier/search", {"name": name, "tag": tag, "division": division})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_premier_conferences() -> dict[str, Any]:
+    """List all Valorant Premier conferences (ids, names, regions, timezones).
+
+    Use a returned conference id with get_premier_leaderboard to narrow a
+    regional board.
+    """
     return await _henrik_get("/valorant/v1/premier/conferences")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_premier_seasons(region: Region) -> dict[str, Any]:
+    """List Valorant Premier seasons for a region, with event windows and dates.
+
+    Args:
+        region: Server region — eu, na, latam, br, ap, or kr.
+    """
     return await _henrik_get(f"/valorant/v1/premier/seasons/{region}")
 
 
@@ -3879,47 +4090,59 @@ async def get_premier_leaderboard(
     return await _henrik_get(path)
 
 
-# Esports
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_esports_schedule(region: EsportsRegion | None = None, league: list[League] | None = None) -> list[dict[str, Any]]:
-    return await esports.get_esports_games_data(region, league)
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_esports_schedule_by_region(region: EsportsRegion) -> list[dict[str, Any]]:
-    return await esports.get_esports_games_data(region, None)
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_esports_schedule_by_league(league: list[League]) -> list[dict[str, Any]]:
-    return await esports.get_esports_games_data(None, league)
-
-
 # Queue / Status / Version / Store / Website
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_queue_status(region: Region) -> dict[str, Any]:
+    """List matchmaking queue availability for a region.
+
+    Returns each queue (competitive, unrated, swiftplay, ...) with whether it
+    is enabled plus mode metadata such as team size and party requirements.
+    For maintenance/incident status use get_live_status instead.
+
+    Args:
+        region: Server region — eu, na, latam, br, ap, or kr.
+    """
     return await _henrik_get(f"/valorant/v1/queue-status/{region}")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_server_status(region: Region) -> dict[str, Any]:
+    """Raw platform status wrapper (legacy, hidden by default). Prefer get_live_status."""
     return await _henrik_get(f"/valorant/v1/status/{region}")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_valorant_version(region: Region) -> dict[str, Any]:
+    """Return the current Valorant client version and branch for a region.
+
+    Small payload: version string, client build date, and branch.
+
+    Args:
+        region: Server region — eu, na, latam, br, ap, or kr.
+    """
     return await _henrik_get(f"/valorant/v1/version/{region}")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_store_featured_v2() -> dict[str, Any]:
+    """Return the current featured Valorant store bundles (v2 endpoint).
+
+    Includes bundle names, prices, item contents, and time remaining. This is
+    the global featured store, not a specific player's storefront.
+    """
     return await _henrik_get("/valorant/v2/store-featured")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_valorant_news(countrycode: str = "en-us") -> dict[str, Any]:
+    """Return recent news articles from the official Valorant website.
+
+    Each entry has title, URL, banner image, category, and publish date.
+
+    Args:
+        countrycode: Site locale in 'xx-xx' form (e.g. 'en-us', 'de-de').
+    """
     return await _henrik_get(f"/valorant/v1/website/{countrycode}")
 
 
@@ -3996,29 +4219,11 @@ async def get_academy_weekly_playtime_report(
     }
 
 
-# Internal helper (no longer a registered tool): its output is embedded
-# verbatim in get_trial_readiness_score responses (role_profile key).
-async def get_role_profile(
-    region: Region,
-    name: str,
-    tag: str,
-    platform: Platform = "pc",
-    days: int = 14,
-    page_size: int = 10,
-    max_pages: int = 10,
-) -> dict[str, Any]:
-    """Estimate a player role profile from recent agent pool."""
-    report = await get_player_playtime(
-        region=region,
-        name=name,
-        tag=tag,
-        platform=platform,
-        days=days,
-        mode=None,
-        page_size=page_size,
-        max_pages=max_pages,
-    )
-
+# Internal helper: derives a role profile from an already-fetched playtime
+# report so the scouting tools can share one fetch per player. Its output is
+# embedded verbatim in get_trial_readiness_score responses (role_profile key).
+def _role_profile_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Estimate a player role profile from a get_player_playtime report."""
     agent_counts = _cso_agent_counts_from_report(report)
     role = _cso_role_from_agents(agent_counts)
     agent_pool_size = len(agent_counts)
@@ -4047,39 +4252,16 @@ async def get_role_profile(
     }
 
 
-# Internal helper (no longer a registered tool): its output is embedded
-# verbatim in get_trial_readiness_score responses (consistency key).
-async def get_consistency_score(
-    region: Region,
-    name: str,
-    tag: str,
-    platform: Platform = "pc",
-    days: int = 14,
-    page_size: int = 10,
-    max_pages: int = 10,
+# Internal helper: scores consistency from an already-fetched playtime report
+# and its derived role profile, so the scouting tools can share one fetch per
+# player. Its output is embedded verbatim in get_trial_readiness_score
+# responses (consistency key).
+def _consistency_from_report(
+    activity: dict[str, Any],
+    role: dict[str, Any],
+    days: int,
 ) -> dict[str, Any]:
     """Score player consistency from active days, match volume, playtime and role stability."""
-    activity = await get_player_playtime(
-        region=region,
-        name=name,
-        tag=tag,
-        platform=platform,
-        days=days,
-        mode=None,
-        page_size=page_size,
-        max_pages=max_pages,
-    )
-
-    role = await get_role_profile(
-        region=region,
-        name=name,
-        tag=tag,
-        platform=platform,
-        days=days,
-        page_size=page_size,
-        max_pages=max_pages,
-    )
-
     matches = int(activity.get("matches_counted") or 0)
     active_days = int(activity.get("active_days") or len(activity.get("daily_breakdown", {}) or {}))
     total_seconds = int(activity.get("total_playtime_seconds") or 0)
@@ -4133,26 +4315,23 @@ async def get_trial_readiness_score(
 
     Combines activity consistency, role stability, MMR and recent form.
     This is scouting support only. Human coach review is required.
-    """
-    consistency = await get_consistency_score(
-        region=region,
-        name=name,
-        tag=tag,
-        platform=platform,
-        days=days,
-        page_size=page_size,
-        max_pages=max_pages,
-    )
 
-    role = await get_role_profile(
+    The activity window is fetched once per player and shared by the
+    consistency and role-profile computations, keeping upstream request
+    volume bounded.
+    """
+    activity_report = await get_player_playtime(
         region=region,
         name=name,
         tag=tag,
         platform=platform,
         days=days,
+        mode=None,
         page_size=page_size,
         max_pages=max_pages,
     )
+    role = _role_profile_from_report(activity_report)
+    consistency = _consistency_from_report(activity_report, role, days)
 
     recent = await get_recent_form(region, name, tag, platform, 10)
     mmr_payload = await get_mmr_v3(region, name, tag, platform)
@@ -4255,11 +4434,15 @@ async def get_player_playtime(
     mode: str | None = None,
     page_size: int = 10,
     max_pages: int = 10,
+    include_matches: bool = False,
 ) -> dict[str, Any]:
     """Calculate player playtime over a date window using v4 match metadata.
 
     Uses v4 match history metadata.started_at and metadata.game_length_in_ms.
-    This is designed for weekly reporting and is more accurate than match-count estimates.
+    This is designed for weekly reporting and is more accurate than
+    match-count estimates. Returns totals, daily/mode breakdowns, and agent
+    counts; the per-match row list is omitted by default to keep the payload
+    small (a wide scan can cover up to 250 matches).
 
     Args:
         region: Server region.
@@ -4270,6 +4453,7 @@ async def get_player_playtime(
         mode: Optional queue filter, e.g. competitive, swiftplay, unrated.
         page_size: Henrik v4 matchlist page size. Docs indicate max 10.
         max_pages: Number of pages to scan.
+        include_matches: Also return the per-match rows (default False).
     """
     now, window_start = _playtime_window(days)
 
@@ -4374,7 +4558,9 @@ async def get_player_playtime(
 
             if match_id:
                 try:
-                    details = await get_match_details_v4(region, match_id)
+                    # Served from the shared match-detail cache so repeated
+                    # scans (dashboards, scouting) do not refetch details.
+                    details = await matches.get_match(region, match_id)
                     player_row = _find_player_in_match(details, name=name, tag=tag)
                     if player_row:
                         agent = _agent_name(player_row)
@@ -4410,7 +4596,7 @@ async def get_player_playtime(
         confidence = "low"
         notes.append("No matches with usable duration metadata were found in the requested window.")
 
-    return {
+    output: dict[str, Any] = {
         "player": f"{name}#{tag}",
         "region": region,
         "platform": platform,
@@ -4427,12 +4613,14 @@ async def get_player_playtime(
         "daily_breakdown": daily,
         "mode_breakdown": modes,
         "agent_counts": agent_counts,
-        "matches": counted,
         "skipped": skipped[:20],
         "agent_lookup_errors": agent_lookup_errors[:20],
         "confidence": confidence,
         "notes": notes,
     }
+    if include_matches:
+        output["matches"] = counted
+    return output
 
 
 # Internal helper (no longer a registered tool): used by
