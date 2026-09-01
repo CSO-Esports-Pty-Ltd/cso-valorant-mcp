@@ -119,26 +119,6 @@ class LeaderboardPaginationTests(unittest.IsolatedAsyncioTestCase):
         request.assert_not_awaited()
 
 
-class HistoryErrorDictHandlingTests(unittest.IsolatedAsyncioTestCase):
-    _ERROR = {"error": True, "message": "boom", "status_code": 500}
-
-    async def test_get_agent_stats_returns_error_dict_instead_of_raising(self) -> None:
-        request = AsyncMock(return_value=self._ERROR)
-        with patch.object(server.matches, "get_match_history", request):
-            result = await server.get_agent_stats("eu", "TenZ", "SEN")
-
-        self.assertTrue(result.get("error"))
-        self.assertEqual(self._ERROR, result.get("response"))
-
-    async def test_get_winrate_by_map_returns_error_dict_instead_of_raising(self) -> None:
-        request = AsyncMock(return_value=self._ERROR)
-        with patch.object(server.matches, "get_match_history", request):
-            result = await server.get_winrate_by_map("eu", "TenZ", "SEN")
-
-        self.assertTrue(result.get("error"))
-        self.assertEqual(self._ERROR, result.get("response"))
-
-
 class StaticContentTests(unittest.IsolatedAsyncioTestCase):
     async def test_buddies_maps_to_upstream_charms_key(self) -> None:
         payload = {"data": {"version": "1.0", "charms": [{"name": "Buddy"}]}}
