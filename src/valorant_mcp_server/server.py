@@ -6,7 +6,6 @@ as a set of MCP tools callable by any MCP-compatible AI client.
 
 Environment variables:
   HENRIK_API_KEY  (required) Your Henrik Dev API key.
-  MCP_EXPOSE_LEGACY_TOOLS  (optional) Re-enable redundant compatibility tools.
 
 Usage:
   valorant-mcp-server              # run via installed script
@@ -1101,30 +1100,6 @@ DEFAULT_DASHBOARD_ROSTER: list[dict[str, Any]] = [
     },
 ]
 
-REDUNDANT_TOOL_NAMES = frozenset(
-    {
-        "get_account_by_puuid_v1",
-        "get_account_by_puuid_v2",
-        "get_account_v1",
-        "get_account_v2",
-        "get_agent_stats",
-        "get_leaderboard_v3",
-        "get_match_details",
-        "get_match_details_v4",
-        "get_match_history_v4",
-        "get_mmr",
-        "get_mmr_by_puuid_v3",
-        "get_mmr_history",
-        "get_mmr_history_by_puuid",
-        "get_mmr_history_v1",
-        "get_mmr_v3",
-        "get_player_activity_report",
-        "get_server_status",
-        "get_weekly_performance",
-        "get_winrate_by_map",
-    }
-)
-
 _DASHBOARD_CACHE: dict[str, Any] | None = None
 _DASHBOARD_CACHE_KEY: str | None = None
 _DASHBOARD_CACHE_EXPIRES_AT = 0.0
@@ -2185,65 +2160,6 @@ async def get_account(
 
 
 # ---------------------------------------------------------------------------
-# MMR / rank tools
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    )
-)
-async def get_mmr(
-    region: Region,
-    name: str,
-    tag: str,
-    platform: Platform = "pc",
-) -> dict[str, Any]:
-    """Retrieve current MMR / rank details for a player by Player#Tag.
-
-    Returns account, peak, currentposition
-    and seasonal mmr info.
-
-    Args:
-        region: Server region — eu, na, latam, br, ap, or kr.
-        name: In-game name.
-        tag: Tag line without '#'.
-        platform: 'pc' (default) or 'console'.
-    """
-    return await mmr.get_mmr(region, name, tag, platform)
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    )
-)
-async def get_mmr_history(
-    region: Region,
-    puuid: str,
-    platform: Platform = "pc",
-) -> dict[str, Any]:
-    """Retrieve ranked rating (RR) change history for a player by PUUID.
-
-    Each entry shows the RR gained/lost in a competitive match along
-    with the tier, map, and date.
-
-    Args:
-        region: Server region — eu, na, latam, br, ap, or kr.
-        puuid: Player unique identifier.
-        platform: 'pc' (default) or 'console'.
-    """
-    return await mmr.get_mmr_history(region, puuid, platform)
-
-
-# ---------------------------------------------------------------------------
 # Match tools
 # ---------------------------------------------------------------------------
 
@@ -2719,100 +2635,6 @@ async def get_player_summary(
         "confidence": aggregate["confidence"],
         "errors": errors,
     }
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_weekly_performance(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 20) -> dict[str, Any]:
-    """Legacy alias of get_player_summary (hidden by default).
-
-    Despite the name it aggregates over get_player_summary's default 30-day
-    window, not a strict week. Prefer get_player_summary directly.
-    """
-    return await get_player_summary(region, name, tag, platform, match_count)
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_agent_stats(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 20) -> dict[str, Any]:
-    """Aggregate recent K/D/A by agent (legacy tool, hidden by default).
-
-    Prefer get_player_pools, which returns the same per-agent rollup plus the
-    per-map rollup from one fetch. Heavy: fetches one full match payload per
-    counted match.
-    """
-    history = await matches.get_match_history(region, name, tag, platform, None, None, match_count)
-    if not isinstance(history, list):
-        return {
-            "error": True,
-            "message": "Could not retrieve player match history",
-            "response": history,
-        }
-    result: dict[str, dict[str, Any]] = {}
-
-    for item in history[:match_count]:
-        match_id = item.get("match_id") or item.get("id") or item.get("metadata", {}).get("matchid")
-        if not match_id:
-            continue
-        full = await matches.get_match(region, match_id)
-        row = _find_player_in_match(full, name=name, tag=tag)
-        if not row:
-            continue
-        agent = _agent_name(row)
-        st = _player_stats(row)
-        bucket = result.setdefault(agent, {"matches": 0, "kills": 0, "deaths": 0, "assists": 0})
-        bucket["matches"] += 1
-        bucket["kills"] += st["kills"]
-        bucket["deaths"] += st["deaths"]
-        bucket["assists"] += st["assists"]
-
-    for bucket in result.values():
-        deaths = max(bucket["deaths"], 1)
-        bucket["kd"] = round(bucket["kills"] / deaths, 2)
-        bucket["kda"] = round((bucket["kills"] + bucket["assists"]) / deaths, 2)
-
-    return result
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_winrate_by_map(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 20) -> dict[str, Any]:
-    """Aggregate recent map winrate (legacy tool, hidden by default).
-
-    Prefer get_player_pools, which returns the same per-map rollup plus the
-    per-agent rollup from one fetch. Heavy: fetches one full match payload per
-    counted match.
-    """
-    history = await matches.get_match_history(region, name, tag, platform, None, None, match_count)
-    if not isinstance(history, list):
-        return {
-            "error": True,
-            "message": "Could not retrieve player match history",
-            "response": history,
-        }
-    result: dict[str, dict[str, Any]] = {}
-
-    for item in history[:match_count]:
-        match_id = item.get("match_id") or item.get("id") or item.get("metadata", {}).get("matchid")
-        if not match_id:
-            continue
-        full = await matches.get_match(region, match_id)
-        row = _find_player_in_match(full, name=name, tag=tag)
-        if not row:
-            continue
-        map_name = _map_name_from_match(full)
-        won = _team_won(row, full)
-        bucket = result.setdefault(map_name, {"matches": 0, "wins": 0, "losses": 0, "unknown_results": 0})
-        bucket["matches"] += 1
-        if won is True:
-            bucket["wins"] += 1
-        elif won is False:
-            bucket["losses"] += 1
-        else:
-            bucket["unknown_results"] += 1
-
-    for bucket in result.values():
-        decided = bucket["wins"] + bucket["losses"]
-        bucket["winrate"] = round(bucket["wins"] / decided, 3) if decided else None
-
-    return result
 
 
 # Internal helper (no longer a registered tool): used by
@@ -3467,16 +3289,6 @@ async def get_rank_history(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_match_details(region: Region, match_id: str) -> dict[str, Any]:
-    """Legacy alias for full v4 match details (hidden by default).
-
-    Returns the raw Henrik envelope, uncached. Prefer get_match (cached) or
-    the compact per-match tools such as get_match_player_stats_compact.
-    """
-    return await get_match_details_v4(region, match_id)
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_live_status(region: Region) -> dict[str, Any]:
     """Retrieve current Valorant platform status for a region.
 
@@ -3538,69 +3350,9 @@ async def get_static_content(content: str = "agents", locale: str | None = None)
     return _content_slice(payload, keys[0])
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_player_activity_report(
-    region: Region,
-    name: str,
-    tag: str,
-    platform: Platform = "pc",
-    days: int = 7,
-    mode: str | None = None,
-    page_size: int = 10,
-    max_pages: int = 10,
-    include_matches: bool = False,
-) -> dict[str, Any]:
-    """Legacy alias of get_player_playtime (hidden by default). Prefer get_player_playtime."""
-    return await get_player_playtime(
-        region, name, tag, platform, days, mode, page_size, max_pages, include_matches
-    )
-
-
 # ---------------------------------------------------------------------------
 # HenrikDev Full API Wrapper Tools
 # ---------------------------------------------------------------------------
-
-# Accounts
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_account_v1(name: str, tag: str, force: bool = False) -> dict[str, Any]:
-    """Raw Henrik v1 account lookup by Riot ID (legacy, hidden by default).
-
-    Returns the raw v1 envelope (puuid, region, account level, card). Prefer
-    get_account, which uses the newer v2 endpoint.
-    """
-    try:
-        safe_name, safe_tag = _riot_id_path(name, tag)
-    except ValueError as exc:
-        return _riot_id_error(exc, name=name, tag=tag)
-    return await _henrik_get(f"/valorant/v1/account/{safe_name}/{safe_tag}", {"force": force})
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_account_v2(name: str, tag: str, force: bool = False) -> dict[str, Any]:
-    """Raw Henrik v2 account lookup by Riot ID (legacy, hidden by default).
-
-    Returns the raw v2 envelope. Prefer get_account, which returns the same
-    data unwrapped and also accepts a puuid.
-    """
-    try:
-        safe_name, safe_tag = _riot_id_path(name, tag)
-    except ValueError as exc:
-        return _riot_id_error(exc, name=name, tag=tag)
-    return await _henrik_get(f"/valorant/v2/account/{safe_name}/{safe_tag}", {"force": force})
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_account_by_puuid_v1(puuid: str, force: bool = False) -> dict[str, Any]:
-    """Raw Henrik v1 account lookup by PUUID (legacy, hidden by default). Prefer get_account."""
-    return await _henrik_get(f"/valorant/v1/by-puuid/account/{puuid}", {"force": force})
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_account_by_puuid_v2(puuid: str, force: bool = False) -> dict[str, Any]:
-    """Raw Henrik v2 account lookup by PUUID (legacy, hidden by default). Prefer get_account."""
-    return await _henrik_get(f"/valorant/v2/by-puuid/account/{puuid}", {"force": force})
-
 
 # Content
 
@@ -3676,7 +3428,8 @@ async def valorant_game_modes_resource() -> str:
 
 # Matches
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): full-payload name+tag fetch
+# used by the playtime/activity collectors.
 async def get_match_history_v4(
     region: Region,
     name: str,
@@ -3687,10 +3440,10 @@ async def get_match_history_v4(
     size: int | None = None,
     start: int | None = None,
 ) -> dict[str, Any]:
-    """Raw Henrik v4 match history by Riot ID (legacy, hidden by default).
+    """Return the raw Henrik v4 match-history envelope by Riot ID.
 
-    Returns the raw v4 envelope with full match summaries — a large payload.
-    Prefer get_match_history, which adds puuid support and a compact mode.
+    Large payload with full match summaries. The registered get_match_history
+    tool adds puuid support and a compact mode on top of this.
     """
     try:
         safe_name, safe_tag = _riot_id_path(name, tag)
@@ -3785,12 +3538,13 @@ async def get_match_history_by_puuid_trimmed(
     )
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): raw, uncached v4 match detail
+# fetch backing the dashboard's cached match-detail lookup.
 async def get_match_details_v4(region: Region, match_id: str) -> dict[str, Any]:
-    """Raw, uncached Henrik v4 match detail (legacy, hidden by default).
+    """Return the raw, uncached Henrik v4 match-detail envelope.
 
-    Returns the raw v4 envelope — a very large payload. Prefer get_match
-    (cached, unwrapped) or the compact per-match tools.
+    Very large payload. The registered get_match tool returns the same data
+    cached and unwrapped.
     """
     return await _henrik_get(f"/valorant/v4/match/{region}/{match_id}")
 
@@ -3862,13 +3616,10 @@ async def get_stored_matches(
 
 # MMR
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): raw v3 MMR fetch backing the
+# name+tag path of get_rank and the trial-readiness scorer.
 async def get_mmr_v3(region: Region, name: str, tag: str, platform: Platform = "pc") -> dict[str, Any]:
-    """Raw Henrik v3 MMR/rank lookup by Riot ID (legacy, hidden by default).
-
-    Returns the raw v3 envelope with current tier, RR, peak, and seasonal MMR.
-    Prefer get_rank, which also accepts a puuid.
-    """
+    """Return the raw Henrik v3 MMR envelope (tier, RR, peak, seasonal) by Riot ID."""
     try:
         safe_name, safe_tag = _riot_id_path(name, tag)
     except ValueError as exc:
@@ -3876,19 +3627,10 @@ async def get_mmr_v3(region: Region, name: str, tag: str, platform: Platform = "
     return await _henrik_get(f"/valorant/v3/mmr/{region}/{platform}/{safe_name}/{safe_tag}")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_mmr_by_puuid_v3(region: Region, puuid: str, platform: Platform = "pc") -> dict[str, Any]:
-    """Raw Henrik v3 MMR/rank lookup by PUUID (legacy, hidden by default). Prefer get_rank."""
-    return await _henrik_get(f"/valorant/v3/by-puuid/mmr/{region}/{platform}/{puuid}")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): raw v1 RR-change history used
+# by the dashboard rank collector.
 async def get_mmr_history_v1(region: Region, name: str, tag: str) -> dict[str, Any]:
-    """Raw Henrik v1 RR-change history by Riot ID (legacy, hidden by default).
-
-    Returns per-match RR changes. Prefer get_rank_history (by puuid) or
-    get_stored_mmr_history for long-term history.
-    """
+    """Return per-match RR changes (raw Henrik v1 mmr-history envelope) by Riot ID."""
     try:
         safe_name, safe_tag = _riot_id_path(name, tag)
     except ValueError as exc:
@@ -3896,9 +3638,10 @@ async def get_mmr_history_v1(region: Region, name: str, tag: str) -> dict[str, A
     return await _henrik_get(f"/valorant/v1/mmr-history/{region}/{safe_name}/{safe_tag}")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): raw v2 RR-change history
+# backing the registered get_rank_history tool.
 async def get_mmr_history_by_puuid(region: Region, puuid: str, platform: Platform = "pc") -> dict[str, Any]:
-    """Raw Henrik v2 RR-change history by PUUID (legacy, hidden by default). Prefer get_rank_history."""
+    """Return the raw Henrik v2 mmr-history envelope by PUUID."""
     return await _henrik_get(f"/valorant/v2/by-puuid/mmr-history/{region}/{platform}/{puuid}")
 
 
@@ -3942,40 +3685,6 @@ async def get_stored_mmr_history(
             return _riot_id_error(exc, name=name, tag=tag)
         path = f"/valorant/v2/stored-mmr-history/{region}/{platform}/{safe_name}/{safe_tag}"
     return await _henrik_get(path, {"page": page, "size": size})
-
-
-# Leaderboard
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_leaderboard_v3(
-    region: Region,
-    platform: Platform = "pc",
-    puuid: str | None = None,
-    name: str | None = None,
-    tag: str | None = None,
-    season_short: str | None = None,
-    season_id: str | None = None,
-    size: int | None = None,
-    start_index: int | None = None,
-) -> dict[str, Any]:
-    """Raw Henrik v3 leaderboard wrapper (legacy, hidden by default).
-
-    Passes all query params (including season_id and start_index) straight
-    through and returns the raw envelope. Prefer get_leaderboard, which adds
-    validation and a sane default page size.
-    """
-    return await _henrik_get(
-        f"/valorant/v3/leaderboard/{region}/{platform}",
-        {
-            "puuid": puuid,
-            "name": name,
-            "tag": tag,
-            "season_short": season_short,
-            "season_id": season_id,
-            "size": size,
-            "start_index": start_index,
-        },
-    )
 
 
 # Premier
@@ -4106,9 +3815,10 @@ async def get_queue_status(region: Region) -> dict[str, Any]:
     return await _henrik_get(f"/valorant/v1/queue-status/{region}")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+# Internal helper (no longer a registered tool): raw platform-status fetch
+# backing the registered get_live_status tool.
 async def get_server_status(region: Region) -> dict[str, Any]:
-    """Raw platform status wrapper (legacy, hidden by default). Prefer get_live_status."""
+    """Return the raw Henrik v1 platform-status envelope for a region."""
     return await _henrik_get(f"/valorant/v1/status/{region}")
 
 
@@ -4681,26 +4391,6 @@ async def get_weekly_activity_report(
         "notes": report.get("notes", []),
         "audit_available": True,
     }
-
-
-def _legacy_tools_enabled() -> bool:
-    return os.getenv("MCP_EXPOSE_LEGACY_TOOLS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _apply_tool_visibility() -> None:
-    if _legacy_tools_enabled():
-        return
-
-    for tool_name in REDUNDANT_TOOL_NAMES:
-        mcp.remove_tool(tool_name)
-
-
-_apply_tool_visibility()
 
 
 # ---------------------------------------------------------------------------

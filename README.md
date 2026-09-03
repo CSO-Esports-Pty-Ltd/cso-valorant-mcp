@@ -42,8 +42,6 @@ Equip your AI with comprehensive Valorant knowledge:
 
 ## 📸 Demo / Screenshots
 
-![demo](./assets/demo.gif)
-
 > *(Visuals coming soon!)*
 
 ---
@@ -55,7 +53,11 @@ Built with modern Python tooling for maximum performance and reliability:
 - ![Python](https://img.shields.io/badge/Python-3.13-blue?logo=python&logoColor=white) **Python 3.13+**
 - ![uv](https://img.shields.io/badge/uv-Package%20Manager-purple) **uv** for blazing-fast dependency management
 - ![httpx](https://img.shields.io/badge/httpx-Async%20HTTP-green) **httpx** for non-blocking API calls
-- ![MCP](https://img.shields.io/badge/MCP-Protocol-00E5FF) **mcp[cli]** for seamless Model Context Pr## 🚀 Quick Start / Setup
+- ![MCP](https://img.shields.io/badge/MCP-Protocol-00E5FF) **mcp[cli]** for seamless Model Context Protocol support
+
+---
+
+## 🚀 Quick Start / Setup
 
 To use this server, you need a **Henrik API Key** (get one at [HenrikDev Docs](https://docs.henrikdev.xyz/)) and **Docker** installed.
 
@@ -80,7 +82,7 @@ Configure your preferred MCP client by adding the following snippet to your conf
         "--rm",
         "-e",
         "HENRIK_API_KEY=your_api_key_here",
-        "ghcr.io/codenilson/valorant-mcp-server:latest"
+        "ghcr.io/cso-esports-pty-ltd/cso-valorant-mcp:latest"
       ]
     }
   }
@@ -106,7 +108,7 @@ Simply add this to your MCP servers configuration menu or JSON:
         "--rm",
         "-e",
         "HENRIK_API_KEY=your_api_key_here",
-        "ghcr.io/codenilson/valorant-mcp-server:latest"
+        "ghcr.io/cso-esports-pty-ltd/cso-valorant-mcp:latest"
       ]
     }
   }
@@ -130,7 +132,7 @@ Simply add this to your MCP servers configuration menu or JSON:
         "--rm",
         "-e",
         "HENRIK_API_KEY=your_api_key_here",
-        "ghcr.io/codenilson/valorant-mcp-server:latest"
+        "ghcr.io/cso-esports-pty-ltd/cso-valorant-mcp:latest"
       ]
     }
   }
@@ -144,14 +146,12 @@ Simply add this to your MCP servers configuration menu or JSON:
 
 If you want to run the server from source, build the Docker image locally, or contribute to the project, follow these steps.
 
-The default MCP surface exposes 37 canonical tools. Tools that differed only
-by identifier (Riot ID vs PUUID) or output size have been merged into single
+The MCP surface exposes 37 canonical tools. Tools that differed only by
+identifier (Riot ID vs PUUID) or output size have been merged into single
 tools taking `name`+`tag` or `puuid` plus a `compact` flag where relevant.
-Redundant compatibility aliases and older endpoint wrappers are hidden from
-tool discovery but remain available in the codebase. Set
-`MCP_EXPOSE_LEGACY_TOOLS=true` to restore the legacy 56-tool surface during a
-migration or rollback. The esports schedule tool is named
-`get_esports_schedule` (formerly `get_esports_games_data`).
+The redundant compatibility aliases and older endpoint wrappers have been
+removed. The esports schedule tool is named `get_esports_schedule`
+(formerly `get_esports_games_data`).
 
 ### Prerequisites
 - **Python 3.13+** and **uv** package manager
@@ -161,8 +161,8 @@ migration or rollback. The esports schedule tool is named
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/codeNilson/valorant-mcp-server
-   cd valorant-mcp-server
+   git clone https://github.com/CSO-Esports-Pty-Ltd/cso-valorant-mcp
+   cd cso-valorant-mcp
    ```
 
 2. **Sync dependencies:**
@@ -179,7 +179,7 @@ migration or rollback. The esports schedule tool is named
          "command": "uv",
          "args": [
            "--directory",
-           "C:\\path\\to\\valorant-mcp-server",
+           "C:\\path\\to\\cso-valorant-mcp",
            "run",
            "valorant-mcp-server"
          ],
@@ -197,8 +197,8 @@ If you prefer to build the container yourself instead of using the pre-built ima
 
 1. **Clone and build:**
    ```bash
-   git clone https://github.com/codeNilson/valorant-mcp-server
-   cd valorant-mcp-server
+   git clone https://github.com/CSO-Esports-Pty-Ltd/cso-valorant-mcp
+   cd cso-valorant-mcp
    docker build -t valorant-mcp-server .
    ```
 

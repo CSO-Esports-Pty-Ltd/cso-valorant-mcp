@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -61,16 +63,36 @@ jobs:
           uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/requirements-audit.txt
           uvx pip-audit -r /tmp/requirements-audit.txt
 
-      - name: Check package import
+      - name: Smoke test tool registry
         run: |
           uv run python - <<'PY'
           import asyncio
-          import valorant_mcp_server.server as server
+          import os
+          from unittest.mock import patch
+
+          from valorant_mcp_server import http_server
+          from valorant_mcp_server.server import mcp
 
           async def main():
-              tools = await server.mcp.list_tools()
-              names = {tool.name for tool in tools}
-              required = {
+              tools = await mcp.list_tools()
+              resources = await mcp.list_resources()
+              assert tools, "No MCP tools registered"
+              tool_names = {tool.name for tool in tools}
+              resource_uris = {str(resource.uri) for resource in resources}
+              required_tools = {
+                  "get_rank",
+                  "get_rank_history",
+                  "get_match",
+                  "get_live_status",
+                  "get_static_content",
+                  "get_player_playtime",
+                  "get_trial_readiness_score",
+                  "compare_players",
+                  "screen_candidates",
+                  "get_account",
+                  "get_premier_team",
+                  "get_premier_leaderboard",
+                  "get_stored_mmr_history",
                   "get_match_rounds_summary",
                   "get_match_round",
                   "get_match_events_compact",
@@ -87,11 +109,21 @@ jobs:
                   "get_leaderboard",
                   "get_esports_schedule",
               }
-              assert required <= names, required - names
-              assert "get_esports_games_data" not in names
-              print("valorant_mcp_server import ok")
+              assert required_tools <= tool_names, required_tools - tool_names
+              assert "get_esports_games_data" not in tool_names
+              assert len(tool_names) == 37, len(tool_names)
+              assert "valorant://agents" in resource_uris
+              print(f"Registered {len(tools)} MCP tools")
 
           asyncio.run(main())
+
+          os.environ["MCP_HOST"] = "127.0.0.1"
+          os.environ["MCP_PORT"] = "8123"
+          with patch.object(http_server.mcp, "run") as run:
+              http_server.main()
+              run.assert_called_once_with(transport="streamable-http")
+              assert http_server.mcp.settings.host == "127.0.0.1"
+              assert http_server.mcp.settings.port == 8123
           PY
         env:
           HENRIK_API_KEY: ci-placeholder
@@ -100,7 +132,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -113,20 +145,22 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
             type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build image for pull requests
-        if: github.event_name == 'pull_request'
+      - name: Build image without publishing
+        if: github.event_name != 'push'
         uses: docker/build-push-action@v7
         with:
           context: .
           push: false
           load: false
-          tags: ${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
+          tags: ${{ env.IMAGE_NAME }}:ci
 
       - name: Build and publish image
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push'
         uses: docker/build-push-action@v7
         with:
           context: .
